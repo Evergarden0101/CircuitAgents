@@ -1,1 +1,6 @@
 .vscode/settings.json
+racetrack-agents/__pycache__/
+racetrack-agents/agent/__pycache__/
+racetrack-agents/runs/sb3_ppo_task2_laning_overtaking/logs/
+racetrack-agents/runs/sb3_ppo_task2_laning_overtaking_fastdev/logs/
+racetrack-agents/logs/dqn2/
