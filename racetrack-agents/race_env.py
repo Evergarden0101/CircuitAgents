@@ -1,26 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
-import numpy.random as random
-from copy import deepcopy
 
 from highway_env import utils
 from highway_env.envs.common.abstract import AbstractEnv
 from highway_env.road.road import Road, RoadNetwork
 from highway_env.road.lane import StraightLane, CircularLane, LineType
 from highway_env.vehicle.behavior import IDMVehicle
-
-NEXT_ROAD = {
-    ("a", "b"): ("b", "c"),
-    ("b", "c"): ("c", "d"),
-    ("c", "d"): ("d", "e"),
-    ("d", "e"): ("e", "f"),
-    ("e", "f"): ("f", "g"),
-    ("f", "g"): ("g", "h"),
-    ("g", "h"): ("h", "i"),
-    ("h", "i"): ("i", "a"),
-    ("i", "a"): ("a", "b"),
-}
 
 
 class RacetrackFast(AbstractEnv):
@@ -46,7 +32,6 @@ class RacetrackFast(AbstractEnv):
                     "vy",
                     "cos_h",
                     "sin_h",
-                    "long_off",
                     "lat_off",
                     "ang_off",
                 ],
@@ -55,7 +40,6 @@ class RacetrackFast(AbstractEnv):
                     "y": [-100, 100],
                     "vx": [-20, 20],
                     "vy": [-20, 20],
-                    "long_off": [0, 500],
                     "lat_off": [-4, 4],
                     "ang_off": [-3.14159, 3.14159],
                 },
@@ -73,7 +57,7 @@ class RacetrackFast(AbstractEnv):
                 "dynamical": False,
             },
             # Simulation
-            "duration": 300,
+            "duration": 1500,
             "simulation_frequency": 15,
             "policy_frequency": 5,
             # Visuals
@@ -82,10 +66,10 @@ class RacetrackFast(AbstractEnv):
             "centering_position": [0.5, 0.5],
             # Vehicles
             "controlled_vehicles": 1,
-            "other_vehicles": 3,
-            "speed_limit": 12.0,
+            "other_vehicles": 1,
+            "speed_limit": 16.0,
             "terminate_off_road": True,
-            "length": 100,
+            "length": 0,
             "no_lanes": 3,
             # Reward weights (tunable)
             "collision_reward": -5.0,
@@ -96,13 +80,7 @@ class RacetrackFast(AbstractEnv):
             # Misc
             "show_trajectories": False,
         })
-        return deepcopy(config)
-
-    def __init__(self, config: dict = None, render_mode=None, **kwargs):
-        super().__init__(config)
-        self.agent_current = None
-        self.agent_target = None
-        self.offroad_counter = 0
+        return config
 
     def _reset(self) -> None:
         self.agent_current = None
@@ -115,7 +93,7 @@ class RacetrackFast(AbstractEnv):
         net = RoadNetwork()
 
         # A compact oval made of straights and arcs (inspired by racetrack_env)
-        speedlimits = [None, 12, 12, 12, 12, 12, 12, 12, 12]
+        speedlimits = [None, 16, 16, 16, 16, 16, 16, 16, 16]
 
         lane = StraightLane([42, 0], [100, 0], line_types=(LineType.CONTINUOUS, LineType.STRIPED), width=5, speed_limit=speedlimits[1])
         net.add_lane("a", "b", lane)
@@ -158,6 +136,7 @@ class RacetrackFast(AbstractEnv):
         self.road = road
 
     def _make_vehicles(self) -> None:
+        rng = self.np_random
         self.controlled_vehicles = []
         road = self.road
         ego_lane = np.random.randint(2) if self.config.get("random_lane", False) else 0
@@ -165,7 +144,7 @@ class RacetrackFast(AbstractEnv):
         ego_vehicle = self.action_type.vehicle_class(
             road, road.network.get_lane(("a", "b", ego_lane)).position(0, 0),
             heading=road.network.get_lane(("a", "b", ego_lane)).heading_at(0),
-            speed=min(9, self.config["speed_limit"]),
+            speed=min(16, self.config["speed_limit"]),
         )
         ego_vehicle.MAX_SPEED = self.config["speed_limit"]
         road.vehicles.append(ego_vehicle)
@@ -173,12 +152,16 @@ class RacetrackFast(AbstractEnv):
 
         # Add a few traffic vehicles
         if self.config["other_vehicles"] > 0:
-            vehicle = IDMVehicle.make_on_lane(self.road, ("b", "c", 0), longitudinal=0, speed=4)
+            vehicle = IDMVehicle.make_on_lane(self.road, ("b", "c", 0), longitudinal=rng.uniform(
+                    low=0.0, high=self.road.network.get_lane(("b", "c", 0)).length
+                ), speed=6.0 + rng.uniform(high=3.0))
             self.road.vehicles.append(vehicle)
 
         while len(self.road.vehicles) < self.config["other_vehicles"] + 1:
-            random_lane_index = self.road.network.random_lane_index(self.np_random)
-            vehicle = IDMVehicle.make_on_lane(self.road, random_lane_index, longitudinal=random.uniform(low=0, high=self.road.network.get_lane(random_lane_index).length), speed=4)
+            rand_lane_index = self.road.network.random_lane_index(rng)
+            vehicle = IDMVehicle.make_on_lane(self.road, rand_lane_index, longitudinal=rng.uniform(
+                        low=0.0, high=self.road.network.get_lane(rand_lane_index).length
+                    ), speed=6.0 + rng.uniform(high=3.0))
             for v in self.road.vehicles:
                 if np.linalg.norm(vehicle.position - v.position) < 15:
                     break
@@ -216,9 +199,14 @@ class RacetrackFast(AbstractEnv):
         reward = utils.lmap(reward, [-3.0, 3.0], [0.0, 1.0])
         return float(reward)
 
-    def _is_terminal(self) -> bool:
-        return self.vehicle.crashed or self._is_goal() or self.steps >= self.config["duration"]
+    def _is_terminated(self) -> bool:
+        if self.config["terminate_off_road"]:
+            return self.vehicle.crashed or not self.vehicle.on_road or self._is_goal() or self.time >= self.config["duration"]
+        return self.vehicle.crashed or self._is_goal() or self.time >= self.config["duration"]
 
+    def _is_truncated(self) -> bool:
+        return self.time >= self.config["duration"]
+    
     def _reward_laning(self) -> bool:
         current_lane = self.road.network.get_closest_lane_index(self.vehicle.position)[:2]
         # Allow reward when driving on any lane segment (conservative)
