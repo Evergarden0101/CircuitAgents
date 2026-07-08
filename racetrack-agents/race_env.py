@@ -327,26 +327,60 @@ class RacetrackFast(AbstractEnv):
             self.last_segment_start = current_start
             return bonus
     
-    def _is_at_wall(self) -> bool:
+    def _wall_state(self, vehicle):
         """
-        True when car body is within 10% of wall threshold from the wall.
-        Uses lateral offset — correct for BOTH stop and bounce modes.
-        In bounce mode, car is nudged back to threshold; on_road becomes True,
-        but lateral offset is still at threshold → this method catches it.
+        Clearance between the car body and the physical track walls.
+
+        Only the two edges of the whole multi-lane corridor are walls —
+        the painted lines between adjacent lanes are NOT. Lateral position
+        is therefore measured against the first lane (one track edge) and
+        the last lane (the other track edge) of the closest segment,
+        instead of whichever single lane happens to be closest.
+        (On this track, lane i sits at lateral +i*width relative to lane 0
+        on every segment, so lanes[0]/lanes[-1] bound the corridor.)
+
+        Returns (clearance, wall_side, lane, longitudinal) where
+          clearance    gap [m] between car body and the nearest wall
+                       (negative = car overlaps the wall),
+          wall_side    -1 for the wall on lane 0's outer side,
+                       +1 for the wall on the last lane's outer side,
+          lane         boundary lane whose frame defines the wall geometry,
+          longitudinal position along that lane [m],
+        or None when the geometry lookup fails.
         """
         try:
-            lane_idx = self.road.network.get_closest_lane_index(self.vehicle.position)
+            lane_idx = self.road.network.get_closest_lane_index(vehicle.position)
             if lane_idx is None:
-                return False
-            lane = self.road.network.get_lane(lane_idx)
-            _, lateral = lane.local_coordinates(self.vehicle.position)
-            half_lane = lane.width / 2.0
-            half_car  = self.vehicle.WIDTH / 2.0
-            threshold = half_lane - half_car
-            # At threshold = exactly at wall; 0.9 * threshold = 10% inside wall zone
-            return abs(lateral) >= threshold * 0.90
+                return None
+            lanes = self.road.network.graph[lane_idx[0]][lane_idx[1]]
+            first, last = lanes[0], lanes[-1]
+            long_f, lat_f = first.local_coordinates(vehicle.position)
+            long_l, lat_l = last.local_coordinates(vehicle.position)
         except Exception:
+            return None
+
+        half_car = vehicle.WIDTH / 2.0
+        # Corridor spans [-w/2] in the first lane's frame to [+w/2] in the
+        # last lane's frame; lanes are stacked toward positive lateral.
+        low_clearance  = (lat_f + first.width / 2.0) - half_car
+        high_clearance = (last.width / 2.0 - lat_l) - half_car
+        if low_clearance <= high_clearance:
+            return low_clearance, -1.0, first, long_f
+        return high_clearance, +1.0, last, long_l
+
+    def _is_at_wall(self) -> bool:
+        """
+        True when car body is within 10% of the free play from a track wall.
+        Uses lateral clearance — correct for BOTH stop and bounce modes.
+        In bounce mode, car is nudged back to the wall line; on_road becomes
+        True, but clearance is still ~0 → this method catches it.
+        """
+        state = self._wall_state(self.vehicle)
+        if state is None:
             return False
+        clearance, _, lane, _ = state
+        free_play = lane.width / 2.0 - self.vehicle.WIDTH / 2.0
+        return clearance <= 0.10 * free_play
 
     def _reward(self, action: np.ndarray) -> float:
         self.episode_step += 1
@@ -512,18 +546,12 @@ class RacetrackFast(AbstractEnv):
     # signal than complete freezing
 
     def _pre_step_wall_clamp(self, vehicle) -> None:
-        try:
-            lane_idx = self.road.network.get_closest_lane_index(vehicle.position)
-            if lane_idx is None:
-                return
-            lane = self.road.network.get_lane(lane_idx)
-            longitudinal, lateral = lane.local_coordinates(vehicle.position)
-        except Exception:
+        state = self._wall_state(vehicle)
+        if state is None:
             return
+        clearance, _, _, _ = state
 
-        threshold = lane.width / 2.0 - vehicle.WIDTH / 2.0
-
-        if abs(lateral) <= threshold:
+        if clearance >= 0.0:
             return
 
         if hasattr(vehicle, "action") and isinstance(vehicle.action, dict):
@@ -590,34 +618,24 @@ class RacetrackFast(AbstractEnv):
         """
         mode = self.config.get("wall_mode", "stop")
 
-        # Find closest lane to get geometry
-        try:
-            lane_idx = self.road.network.get_closest_lane_index(vehicle.position)
-            if lane_idx is None:
-                return
-            lane = self.road.network.get_lane(lane_idx)
-            longitudinal, lateral = lane.local_coordinates(vehicle.position)
-        except Exception:
+        # Corridor-level wall geometry: only the two track edges are walls,
+        # never the boundary between adjacent lanes
+        state = self._wall_state(vehicle)
+        if state is None:
             return
+        clearance, wall_side, lane, longitudinal = state
 
-        # Wall threshold: car body reaches wall when centre offset > half_lane - half_car
-        half_lane = lane.width / 2.0
-        half_car  = vehicle.WIDTH / 2.0
-        threshold = half_lane - half_car
-
-        if abs(lateral) <= threshold:
-            return   # inside lane, no wall contact
+        if clearance >= 0.0:
+            return   # inside the track corridor, no wall contact
 
         # ── Wall contact detected ──────────────────────────────────
-        overshoot  = abs(lateral) - threshold
-        wall_side  = np.sign(lateral)   # +1 = left wall, -1 = right wall
+        overshoot = -clearance
 
-        # Lane heading at this longitudinal position
+        # Boundary lane heading at this longitudinal position
         heading  = lane.heading_at(longitudinal)
         tangent  = np.array([ np.cos(heading),  np.sin(heading)])
         normal   = np.array([-np.sin(heading),  np.cos(heading)])
-        # normal points LEFT of travel direction
-        tangent   = np.array([ np.cos(heading),  np.sin(heading)])
+        # normal points toward positive lateral (left of travel direction)
 
         # Current velocity from kinematic model
         current_vel = vehicle.speed * np.array([
