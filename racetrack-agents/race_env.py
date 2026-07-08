@@ -124,16 +124,18 @@ class RacetrackFast(AbstractEnv):
             "verbose_spawn":   False,       # print warning if not all NPCs spawned
 
             # Wall collision behaviour
-            "wall_mode":           "bounce",   # physics: stop car at wall
-            "wall_restitution":     0.1,     # only for bounce mode
-            "wall_friction":        0.3,
+            "wall_mode":           "stop",   # pin at wall; escape by reversing
+            "wall_restitution":     0.1,     # only used in bounce mode
+            "wall_friction":        0.6,     # high tangential friction, matches the real env
             "wall_escape_reward":   0.4,     # bonus for actively reversing from wall
             "wall_stuck_penalty":   0.4,     # penalty for sitting still at wall
             "wall_ride_penalty":    0.6,     # extra penalty ∝ speed while grinding the wall
             # Terminate after this many consecutive steps of wall contact at
-            # ANY speed (5 s @ 5 Hz). Covers both the parked-against-the-wall
+            # ANY speed (7 s @ 5 Hz). Covers both the parked-against-the-wall
             # case and the grinding-along-the-wall exploit with one rule.
-            "max_wall_contact_steps": 25,
+            # Stop mode pins the car at the wall (contact persists), so the
+            # escape manoeuvre gets a longer budget than bounce mode needed.
+            "max_wall_contact_steps": 35,
         })
         return config
 
@@ -701,9 +703,6 @@ class RacetrackFast(AbstractEnv):
         v_perp  = float(np.dot(current_vel, normal))   # normal component (into wall)
 
         if mode == "stop":
-            # Zero speed — car is stuck, must use reverse to escape
-            vehicle.speed = 0.0
-
             # BicycleVehicle has lateral velocity from tire slip
             # Must clear it or the vehicle will continue sliding laterally
             if hasattr(vehicle, "lateral_velocity"):
@@ -713,13 +712,17 @@ class RacetrackFast(AbstractEnv):
 
             friction    = self.config.get("wall_friction", 0.5)
             new_v_along = v_along * (1.0 - friction)
-            new_speed   = abs(new_v_along)
+
+            # Cancel ONLY the velocity component directed INTO the wall;
+            # an outward component (the reverse-escape manoeuvre) must
+            # survive or the car could never leave the wall
+            new_v_perp = 0.0 if wall_side * v_perp > 0.0 else v_perp
+
+            new_vel   = new_v_along * tangent + new_v_perp * normal
+            new_speed = float(np.linalg.norm(new_vel))
 
             if new_speed > 0.05:
-                direction = np.sign(new_v_along)
-                vehicle.heading = float(
-                    np.arctan2(direction * tangent[1], direction * tangent[0])
-                )
+                vehicle.heading = float(np.arctan2(new_vel[1], new_vel[0]))
             vehicle.speed = float(np.clip(new_speed, 0.0, vehicle.MAX_SPEED))
 
             if hasattr(vehicle, "action") and isinstance(vehicle.action, dict):
