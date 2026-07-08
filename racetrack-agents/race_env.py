@@ -45,7 +45,12 @@ class RacetrackFast(AbstractEnv):
                     "lat_off": [-4, 4],
                     "ang_off": [-3.14159, 3.14159],
                 },
-                "grid_size": [[-18, 18], [-18, 18]],
+                # Asymmetric ego-frame FOV: 27 m ahead / 9 m behind (x),
+                # ±18 m lateral (y). Still 36 m / 12 cells per axis, so the
+                # obs shape stays (10, 12, 12) and the CNN is unchanged;
+                # the ego just sits off-centre at cell (3, 6). The forward
+                # bias gives ~2-3 s of corner preview at racing speed.
+                "grid_size": [[-9, 27], [-18, 18]],
                 "grid_step": [3, 3],
                 "as_image": False,
                 "align_to_vehicle_axes": True,
@@ -54,7 +59,7 @@ class RacetrackFast(AbstractEnv):
                 "type": "ContinuousAction",
                 "longitudinal": True,
                 "lateral": True,
-                "acceleration_range": [-3.0, 6.0],
+                "acceleration_range": [-5.0, 5.0],
                 "steering_range": [-np.pi / 6, np.pi / 6],
                 "dynamical": True,
             },
@@ -73,15 +78,17 @@ class RacetrackFast(AbstractEnv):
             "terminate_off_road":        True,
             "length": 0,
             "no_lanes": 3,
-            "car_length": 2.5,
+            "car_length": 4.5,
             # Reward weights (tunable)
             "collision_reward": -5.0,
             "lane_centering_reward":  1.0,   # weight on 1/(1+cost×lat²)
             "lane_centering_cost": 6.0,
             "action_penalty": 0.05,
             "speed_reward": 1.0,
-            "steering_penalty": 0.25,
-            "steering_jerk_penalty":  0.40,   # penalise direction reversals specifically
+            # Kept small: taxing steering too hard makes "hold throttle and
+            # let the wall steer the car" score better than learning to corner
+            "steering_penalty": 0.10,
+            "steering_jerk_penalty":  0.20,   # penalise direction reversals specifically
             # ── Forward motion terms ───────────────────────────────────
             "reverse_penalty":  0.80,        # extra discrete hit for any speed < -0.5 m/s
             "idle_penalty":     0.80,        # hit for abs(speed) < 0.5 m/s
@@ -122,7 +129,11 @@ class RacetrackFast(AbstractEnv):
             "wall_friction":        0.3,
             "wall_escape_reward":   0.4,     # bonus for actively reversing from wall
             "wall_stuck_penalty":   0.4,     # penalty for sitting still at wall
-            "max_wall_stuck_steps":  15,      # FIX: now in default_config
+            "wall_ride_penalty":    0.6,     # extra penalty ∝ speed while grinding the wall
+            # Terminate after this many consecutive steps of wall contact at
+            # ANY speed (5 s @ 5 Hz). Covers both the parked-against-the-wall
+            # case and the grinding-along-the-wall exploit with one rule.
+            "max_wall_contact_steps": 25,
         })
         return config
 
@@ -132,7 +143,7 @@ class RacetrackFast(AbstractEnv):
         self.checkpoint_count   = 0
         self.lap_count          = 0
         self.episode_step       = 0
-        self.wall_stuck_steps   = 0     # how long stuck at wall
+        self.wall_contact_steps = 0     # consecutive steps touching a wall (any speed)
         self._make_road()
         self._make_vehicles()
 
@@ -164,8 +175,12 @@ class RacetrackFast(AbstractEnv):
         net.add_lane("e", "f", CircularLane(center3, radii3 + 5, np.deg2rad(0), np.deg2rad(136), width=5, clockwise=True, line_types=(LineType.CONTINUOUS, LineType.STRIPED), speed_limit=speedlimits[5]))
         net.add_lane("e", "f", CircularLane(center3, radii3, np.deg2rad(0), np.deg2rad(137), width=5, clockwise=True, line_types=(LineType.NONE, LineType.CONTINUOUS), speed_limit=speedlimits[5]))
 
+        # Second lane must sit at EXACTLY one lane width (5 m) of lateral
+        # offset: 5/sqrt(2) = 3.53553 on each axis. The original offsets
+        # (5.09 m apart) left a ~9 cm strip between the lanes where
+        # vehicle.on_road was False, killing episodes mid-track.
         net.add_lane("f", "g", StraightLane([55.7, -15.7], [35.7, -35.7], line_types=(LineType.CONTINUOUS, LineType.NONE), width=5, speed_limit=speedlimits[6]))
-        net.add_lane("f", "g", StraightLane([59.3934, -19.2], [39.3934, -39.2], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=speedlimits[6]))
+        net.add_lane("f", "g", StraightLane([59.23553, -19.23553], [39.23553, -39.23553], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=speedlimits[6]))
 
         center4 = [18.1, -18.1]
         radii4 = 25
@@ -368,6 +383,22 @@ class RacetrackFast(AbstractEnv):
             return low_clearance, -1.0, first, long_f
         return high_clearance, +1.0, last, long_l
 
+    def _off_track(self) -> bool:
+        """
+        True when the car centre has genuinely left the track corridor.
+        Safety net only — wall physics bounces the car back every sim frame,
+        so this should almost never fire (e.g. tunnelling through a junction
+        gap at high speed). Replaces vehicle.on_road, which is per-lane and
+        reports False on lane stripes / tiny gaps between segments.
+        """
+        state = self._wall_state(self.vehicle)
+        if state is None:
+            return not self.vehicle.on_road
+        clearance, _, _, _ = state
+        # clearance is measured from the car BODY edge; centre crosses the
+        # wall line when clearance < -half_width
+        return clearance < -self.vehicle.WIDTH / 2.0
+
     def _is_at_wall(self) -> bool:
         """
         True when car body is within 10% of the free play from a track wall.
@@ -391,6 +422,14 @@ class RacetrackFast(AbstractEnv):
         # ── 1. Lane centering ──────────────────────────────────────────
         _, lateral = self.vehicle.lane.local_coordinates(self.vehicle.position)
         lane_centering = 1.0 / (1.0 + self.config["lane_centering_cost"] * lateral ** 2)
+
+        # Wall contact state — needed before the speed terms so wall-riding
+        # cannot collect speed payouts
+        at_wall = self._is_at_wall() and not self.vehicle.crashed
+        if at_wall:
+            self.wall_contact_steps += 1
+        else:
+            self.wall_contact_steps = 0
 
         # ── 2. Speed reward — negative for reversing, not zero ─────────
         # Forward:  [0, speed_limit] → [0.0, +1.0]
@@ -419,6 +458,14 @@ class RacetrackFast(AbstractEnv):
             except Exception:
                 forward_vel_reward = 0.0
 
+        # No speed payout while touching the wall — otherwise wall-riding
+        # (holding throttle while the bounce physics re-aligns the heading
+        # and steers the car around corners for free) nets positive reward
+        # and becomes a stable local optimum.
+        if at_wall:
+            speed_reward       = 0.0
+            forward_vel_reward = 0.0
+
         # ── 3. Action penalties — separated, no double counting ─────────
         throttle = float(action[0])
         steering  = float(action[1]) if len(action) > 1 else 0.0
@@ -439,8 +486,6 @@ class RacetrackFast(AbstractEnv):
         jerk_penalty = -self.config["steering_jerk_penalty"] * abs(steer_delta)
         self._prev_steering = steering
 
-        at_wall = self._is_at_wall() and not self.vehicle.crashed
-        
         # ── Reverse and idle penalties ──────────────────────────────
         # Reverse: discrete signal so policy cannot rationalize away gradual drift
         if at_wall:
@@ -475,8 +520,13 @@ class RacetrackFast(AbstractEnv):
                 # (car just started reversing this step)
                 wall_escape_reward = self.config.get("wall_escape_reward", 0.6) * 0.3
             else:
-                # At wall, not reversing → penalty
-                wall_escape_reward = -self.config.get("wall_stuck_penalty", 0.6)
+                # At wall, not reversing → penalty; grows with speed so
+                # grinding ALONG the wall is worse than stopping at it
+                ride = float(np.clip(speed / speed_limit, 0.0, 1.0))
+                wall_escape_reward = -(
+                    self.config.get("wall_stuck_penalty", 0.6)
+                    + self.config.get("wall_ride_penalty", 0.6) * ride
+                )
 
 
         # ──  Compose base reward ─────────────────────────────────────
@@ -500,8 +550,13 @@ class RacetrackFast(AbstractEnv):
         # no future reward means the terminal signal IS the crash signal.
         if self.vehicle.crashed:
             reward = self.config.get("collision_reward", -5.0)
-        elif not self.vehicle.on_road and not at_wall:
-            # TODO： Fully off-road (not just touching wall) → terminate signal
+        elif self.wall_contact_steps >= self.config.get("max_wall_contact_steps", 25):
+            # Sustained wall contact terminates like a crash — a lap must
+            # not be completable by riding the walls
+            reward = self.config.get("collision_reward", -5.0)
+        elif self._off_track():
+            # Centre fully outside the track corridor (deeper than wall
+            # contact, which only means clearance ≈ 0) → terminate signal
             reward = self.config.get("collision_reward", -5.0)
 
         # ── Map to [0, 1] ────────────────────────────────────────────
@@ -517,18 +572,19 @@ class RacetrackFast(AbstractEnv):
     def _is_terminated(self) -> bool:
         if self.vehicle.crashed:
             return True
-        at_wall_now = self._is_at_wall()
 
-        if at_wall_now and abs(self.vehicle.speed) < 0.3:
-            self.wall_stuck_steps += 1
-            return self.wall_stuck_steps >= self.config.get("max_wall_stuck_steps", 15)
+        # Sustained wall contact at ANY speed → terminate. One rule covers
+        # both being parked against the wall and grinding along it (the
+        # wall-riding exploit). Counter is maintained in _reward, which
+        # runs immediately before this method every step.
+        if self.wall_contact_steps >= self.config.get("max_wall_contact_steps", 25):
+            return True
 
-        if not self.vehicle.on_road and not at_wall_now:
-            self.wall_stuck_steps = 0
-            if self.config["terminate_off_road"]:
-                return True
+        # Safety net: car centre escaped the corridor entirely (deeper than
+        # mere wall contact, so no at-wall exemption here).
+        if self._off_track() and self.config["terminate_off_road"]:
+            return True
 
-        self.wall_stuck_steps = 0
         return False
 
     def _is_truncated(self) -> bool:
