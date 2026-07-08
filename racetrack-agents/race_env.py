@@ -55,11 +55,11 @@ class RacetrackFast(AbstractEnv):
                 "longitudinal": True,
                 "lateral": True,
                 "acceleration_range": [-3.0, 6.0],
-                "steering_range": [-np.pi / 4, np.pi / 4],
-                "dynamical": False,
+                "steering_range": [-np.pi / 6, np.pi / 6],
+                "dynamical": True,
             },
             # Simulation
-            "duration": 600,
+            "duration": 800,
             "simulation_frequency": 15,
             "policy_frequency": 5,
             # Visuals
@@ -73,14 +73,15 @@ class RacetrackFast(AbstractEnv):
             "terminate_off_road":        True,
             "length": 0,
             "no_lanes": 3,
+            "car_length": 2.5,
             # Reward weights (tunable)
             "collision_reward": -5.0,
-            "lane_centering_reward":  0.6,   # weight on 1/(1+cost×lat²)
-            "lane_centering_cost": 4.0,
+            "lane_centering_reward":  1.0,   # weight on 1/(1+cost×lat²)
+            "lane_centering_cost": 6.0,
             "action_penalty": 0.05,
             "speed_reward": 1.0,
             "steering_penalty": 0.25,
-            "steering_jerk_penalty":  0.30,   # penalise direction reversals specifically
+            "steering_jerk_penalty":  0.40,   # penalise direction reversals specifically
             # ── Forward motion terms ───────────────────────────────────
             "reverse_penalty":  0.80,        # extra discrete hit for any speed < -0.5 m/s
             "idle_penalty":     0.80,        # hit for abs(speed) < 0.5 m/s
@@ -92,7 +93,7 @@ class RacetrackFast(AbstractEnv):
             # Misc
             "show_trajectories": False,
             # ── NPC spawn randomisation ─────────────────────────────────
-            "initial_speed":    0.0,    # ego spawn speed [m/s]
+            "initial_speed":    0.0,    # ego spawn speed [m/s] //TODO: 4.0
             "ego_min_speed":    -8.0,   # ← prevents reversing; set to 0 not negative
             "ego_max_speed":    16.0,
 
@@ -116,10 +117,12 @@ class RacetrackFast(AbstractEnv):
             "verbose_spawn":   False,       # print warning if not all NPCs spawned
 
             # Wall collision behaviour
-            "wall_mode":           "stop",   # physics: stop car at wall
-            "wall_restitution":     0.3,     # only for bounce mode
-            "wall_escape_reward":   0.5,     # bonus for actively reversing from wall
+            "wall_mode":           "bounce",   # physics: stop car at wall
+            "wall_restitution":     0.1,     # only for bounce mode
+            "wall_friction":        0.3,
+            "wall_escape_reward":   0.4,     # bonus for actively reversing from wall
             "wall_stuck_penalty":   0.4,     # penalty for sitting still at wall
+            "max_wall_stuck_steps":  15,      # FIX: now in default_config
         })
         return config
 
@@ -192,20 +195,38 @@ class RacetrackFast(AbstractEnv):
         ⑤ Separation    — dynamic, speed-proportional safety gap
         """
         rng = self.np_random
+        spawn_options = [
+            ("a", "b", 0),
+            ("a", "b", 1),
+            ("c", "d", 0),
+            ("f", "g", 0),
+            ("h", "i", 0),
+        ]
+        spawn_idx = int(rng.integers(0, len(spawn_options)))
+        spawn_lane_key = spawn_options[spawn_idx]
 
         # ── Ego vehicle ────────────────────────────────────────────────
-        ego_lane   = self.road.network.get_lane(("a", "b", 0))
+        # ego_lane   = self.road.network.get_lane(("a", "b", 0))
+        ego_lane  = self.road.network.get_lane(spawn_lane_key)
+        spawn_long = float(rng.uniform(
+            low  = ego_lane.length * 0.1,
+            high = ego_lane.length * 0.9,
+        ))
 
         ego = self.action_type.vehicle_class.make_on_lane(
             self.road,
-            ("a", "b", 0),
-            longitudinal = ego_lane.length * 0.2,   # start at 20% of lane length
+            # ("a", "b", 0),
+            # longitudinal = ego_lane.length * 0.2,   # start at 20% of lane length
+            spawn_lane_key,
+            longitudinal = spawn_long,
             speed        = self.config.get("initial_speed", 0.0)  ,
         )
         ego.MIN_SPEED = self.config.get("ego_min_speed", -8.0)
         ego.MAX_SPEED = self.config.get("ego_max_speed", 16.0)
+        ego.LENGTH = self.config.get("car_length", 2.5)
         self.road.vehicles.append(ego)
         self.controlled_vehicles = [ego]
+        self.last_segment_start = spawn_lane_key[0]
 
         # ── NPC config keys (add these to default_config) ──────────────
         speed_low   = self.config.get("other_vehicles_speed_low",       1.0)
@@ -251,6 +272,7 @@ class RacetrackFast(AbstractEnv):
             candidate.COMFORT_ACC_MIN = -float(rng.uniform(*self.config["idm_dec_range"]))
             candidate.DISTANCE_WANTED = float(rng.uniform(*self.config["idm_gap_range"]))
             candidate.TIME_WANTED     = float(rng.uniform(*self.config["idm_time_range"]))
+            candidate.LENGTH = self.config.get("car_length", 2.5)
 
             # ⑤ Dynamic separation — larger gap for faster vehicles
             safe_sep = max(min_sep, speed * max_sep_mul)
@@ -304,6 +326,27 @@ class RacetrackFast(AbstractEnv):
 
             self.last_segment_start = current_start
             return bonus
+    
+    def _is_at_wall(self) -> bool:
+        """
+        True when car body is within 10% of wall threshold from the wall.
+        Uses lateral offset — correct for BOTH stop and bounce modes.
+        In bounce mode, car is nudged back to threshold; on_road becomes True,
+        but lateral offset is still at threshold → this method catches it.
+        """
+        try:
+            lane_idx = self.road.network.get_closest_lane_index(self.vehicle.position)
+            if lane_idx is None:
+                return False
+            lane = self.road.network.get_lane(lane_idx)
+            _, lateral = lane.local_coordinates(self.vehicle.position)
+            half_lane = lane.width / 2.0
+            half_car  = self.vehicle.WIDTH / 2.0
+            threshold = half_lane - half_car
+            # At threshold = exactly at wall; 0.9 * threshold = 10% inside wall zone
+            return abs(lateral) >= threshold * 0.90
+        except Exception:
+            return False
 
     def _reward(self, action: np.ndarray) -> float:
         self.episode_step += 1
@@ -362,21 +405,22 @@ class RacetrackFast(AbstractEnv):
         jerk_penalty = -self.config["steering_jerk_penalty"] * abs(steer_delta)
         self._prev_steering = steering
 
-
+        at_wall = self._is_at_wall() and not self.vehicle.crashed
+        
         # ── Reverse and idle penalties ──────────────────────────────
         # Reverse: discrete signal so policy cannot rationalize away gradual drift
-        reverse_penalty = (
-            -self.config.get("reverse_penalty", 0.8)
-            if speed < -0.5 else 0.0
-        )
-
-        # Idle: punish standing still so "do nothing" is not optimal
-        grace = self.config.get("idle_grace_steps", 15)
-        idle_penalty = (
-            -self.config.get("idle_penalty", 0.8)
-            if abs(speed) < 0.5 and self.episode_step > grace
-            else 0.0
-        )
+        if at_wall:
+            reverse_penalty = 0.0
+            idle_penalty    = 0.0
+        else:
+            reverse_penalty = (
+                -self.config.get("reverse_penalty", 0.8) if speed < -0.5 else 0.0
+            )
+            grace = self.config.get("idle_grace_steps", 15)
+            idle_penalty = (
+                -self.config.get("idle_penalty", 0.8)
+                if abs(speed) < 0.5 and self.episode_step > grace else 0.0
+            )
 
         # ── Wall escape reward ──────────────────────────────────────────
         # When stuck at wall, reward reverse throttle specifically
@@ -384,23 +428,22 @@ class RacetrackFast(AbstractEnv):
 
         # Detect wall contact — car is stopped but not crashed, not off-road
         # (off-road is handled separately; wall contact means speed≈0 after _apply_wall_behavior)
-        at_wall = (
-            abs(speed) < 0.3
-            and not self.vehicle.crashed
-            and not self.vehicle.on_road   # wall contact pushes car to boundary
-        )
+        # mode = self.config.get("wall_mode", "stop")
         wall_escape_reward = 0.0
         if at_wall:
-            if throttle < -0.1:
-                # Actively reversing away from wall — positive signal
-                wall_escape_reward = self.config.get("wall_escape_reward", 0.5) * abs(throttle)
-                # Cancel idle penalty (car IS trying to move)
-                idle_penalty = 0.0
-                # Cancel reverse penalty (reversing is CORRECT here)
-                reverse_penalty = 0.0
+            actively_reversing = speed < -0.3   # vehicle IS moving backward
+            if actively_reversing:
+                # Positive reward: proportional to reverse speed
+                escape_ratio       = abs(speed) / max(1.0, abs(ego_min))
+                wall_escape_reward = self.config.get("wall_escape_reward", 0.6) * escape_ratio
+            elif throttle < -0.2:
+                # Policy commands reverse but speed not negative yet
+                # (car just started reversing this step)
+                wall_escape_reward = self.config.get("wall_escape_reward", 0.6) * 0.3
             else:
-                # At wall but not reversing — extra penalty
-                wall_escape_reward = -self.config.get("wall_stuck_penalty", 0.4)
+                # At wall, not reversing → penalty
+                wall_escape_reward = -self.config.get("wall_stuck_penalty", 0.6)
+
 
         # ──  Compose base reward ─────────────────────────────────────
         reward = (
@@ -423,9 +466,9 @@ class RacetrackFast(AbstractEnv):
         # no future reward means the terminal signal IS the crash signal.
         if self.vehicle.crashed:
             reward = self.config.get("collision_reward", -5.0)
-        # elif not self.vehicle.on_road and not at_wall:
+        elif not self.vehicle.on_road and not at_wall:
             # TODO： Fully off-road (not just touching wall) → terminate signal
-            # reward = self.config.get("collision_reward", -5.0)
+            reward = self.config.get("collision_reward", -5.0)
 
         # ── Map to [0, 1] ────────────────────────────────────────────
         # clip_range covers normal operation: base reward ∈ [-3, 3]
@@ -440,22 +483,18 @@ class RacetrackFast(AbstractEnv):
     def _is_terminated(self) -> bool:
         if self.vehicle.crashed:
             return True
+        at_wall_now = self._is_at_wall()
 
-        if not self.vehicle.on_road:
-            # Wall contact: speed zeroed by wall behavior
-            at_wall = abs(self.vehicle.speed) < 0.3
-            if at_wall:
-                self.wall_stuck_steps += 1
-                return self.wall_stuck_steps >= self.config.get("max_wall_stuck_steps", 15)
-            else:
-                # Moving but off-road (not wall contact) → immediate terminate
-                self.wall_stuck_steps = 0
-                if self.config["terminate_off_road"]:
-                    return True
-        else:
+        if at_wall_now and abs(self.vehicle.speed) < 0.3:
+            self.wall_stuck_steps += 1
+            return self.wall_stuck_steps >= self.config.get("max_wall_stuck_steps", 15)
+
+        if not self.vehicle.on_road and not at_wall_now:
             self.wall_stuck_steps = 0
+            if self.config["terminate_off_road"]:
+                return True
 
-        # FIX: no lap termination — multiple laps allowed and encouraged
+        self.wall_stuck_steps = 0
         return False
 
     def _is_truncated(self) -> bool:
@@ -465,6 +504,42 @@ class RacetrackFast(AbstractEnv):
         # current_lane = self.road.network.get_closest_lane_index(self.vehicle.position)[:2]
         # Allow reward when driving on any lane segment (conservative)
         return True
+    
+
+    # ── Fast dev specific wall behavior ──────────────────────────────────
+    # For fast dev, use lighter pre-clamp so exploration can still
+    # output small forward actions (which then bounce), giving more
+    # signal than complete freezing
+
+    def _pre_step_wall_clamp(self, vehicle) -> None:
+        try:
+            lane_idx = self.road.network.get_closest_lane_index(vehicle.position)
+            if lane_idx is None:
+                return
+            lane = self.road.network.get_lane(lane_idx)
+            longitudinal, lateral = lane.local_coordinates(vehicle.position)
+        except Exception:
+            return
+
+        threshold = lane.width / 2.0 - vehicle.WIDTH / 2.0
+
+        if abs(lateral) <= threshold:
+            return
+
+        if hasattr(vehicle, "action") and isinstance(vehicle.action, dict):
+            current_acc = vehicle.action.get("acceleration", 0.0)
+            if self.config.get("fast_dev_wall_clamp", False):
+                # Soft clamp: allow up to 0.5 m/s² forward even at wall
+                # This lets exploration produce some movement signal
+                # rather than complete freezing
+                vehicle.action["acceleration"] = min(
+                    0.5, float(current_acc)
+                )
+            else:
+                # Hard clamp: no forward acceleration at wall (production)
+                vehicle.action["acceleration"] = min(
+                    0.0, float(current_acc)
+                )
 
     def _simulate(self, action: Action | None = None) -> None:
         """
@@ -481,12 +556,14 @@ class RacetrackFast(AbstractEnv):
             if (
                 action is not None
                 and not self.config["manual_control"]
-                and self.steps % int(
-                    self.config["simulation_frequency"]
-                    // self.config["policy_frequency"]
-                ) == 0
+                and self.steps % frames == 0
             ):
                 self.action_type.act(action)
+
+            # Step 2: PRE-step wall clamp — prevent acceleration INTO wall
+            # before road.step() can integrate it
+            # if self.config.get("wall_mode", "none") != "none":
+            #     self._pre_step_wall_clamp(self.vehicle)
 
             self.road.act()
             self.road.step(1 / self.config["simulation_frequency"])
@@ -540,31 +617,53 @@ class RacetrackFast(AbstractEnv):
         tangent  = np.array([ np.cos(heading),  np.sin(heading)])
         normal   = np.array([-np.sin(heading),  np.cos(heading)])
         # normal points LEFT of travel direction
+        tangent   = np.array([ np.cos(heading),  np.sin(heading)])
+
+        # Current velocity from kinematic model
+        current_vel = vehicle.speed * np.array([
+            np.cos(vehicle.heading), np.sin(vehicle.heading)
+        ])
+        v_along = float(np.dot(current_vel, tangent))  # tangential component
+        v_perp  = float(np.dot(current_vel, normal))   # normal component (into wall)
 
         if mode == "stop":
             # Zero speed — car is stuck, must use reverse to escape
             vehicle.speed = 0.0
-            # Nudge position back inside wall boundary
-            # normal points left; left wall (wall_side=+1) needs rightward push (-normal)
+
+            # BicycleVehicle has lateral velocity from tire slip
+            # Must clear it or the vehicle will continue sliding laterally
+            if hasattr(vehicle, "lateral_velocity"):
+                vehicle.lateral_velocity = 0.0
+            if hasattr(vehicle, "yaw_rate"):
+                vehicle.yaw_rate = 0.0
+
+            friction    = self.config.get("wall_friction", 0.5)
+            new_v_along = v_along * (1.0 - friction)
+            new_speed   = abs(new_v_along)
+
+            if new_speed > 0.05:
+                direction = np.sign(new_v_along)
+                vehicle.heading = float(
+                    np.arctan2(direction * tangent[1], direction * tangent[0])
+                )
+            vehicle.speed = float(np.clip(new_speed, 0.0, vehicle.MAX_SPEED))
+
+            if hasattr(vehicle, "action") and isinstance(vehicle.action, dict):
+                vehicle.action["acceleration"] = min(
+                    0.0, float(vehicle.action.get("acceleration", 0.0))
+                )
             vehicle.position -= wall_side * overshoot * normal
 
         elif mode == "bounce":
-            # Decompose current velocity into tangent + normal scalars
-            # FIX 6: cannot set vehicle.velocity (it is @property = speed × direction)
-            # Must update vehicle.speed and vehicle.heading instead
-            current_vel = vehicle.speed * np.array([
-                np.cos(vehicle.heading), np.sin(vehicle.heading)
-            ])
-            v_along = float(np.dot(current_vel, tangent))   # along lane
-            v_perp  = float(np.dot(current_vel, normal))    # into wall
 
-            restitution = self.config.get("wall_restitution", 0.3)
+            restitution = self.config.get("wall_restitution", 0.1)
+            friction    = self.config.get("wall_friction",    0.3)
 
-            # Reflected velocity components
-            new_v_along = v_along
-            new_v_perp  = -restitution * v_perp   # reflect + damp
+            # Bounce: reflect normal, damp tangential by friction
+            new_v_perp  = -restitution * v_perp           # reflect + energy loss
+            new_v_along = v_along * (1.0 - friction)      # friction slows slide
 
-            new_vel = new_v_along * tangent + new_v_perp * normal
+            new_vel   = new_v_along * tangent + new_v_perp * normal
             new_speed = float(np.linalg.norm(new_vel))
 
             vehicle.speed = float(np.clip(
