@@ -71,6 +71,11 @@ class RacetrackFast(AbstractEnv):
             "screen_width": 1000,
             "screen_height": 1000,
             "centering_position": [0.5, 0.5],
+            # Track selection: "fast" (9-segment circuit), "oval"
+            # (2 straights + 2 half-circles), or "random" (new choice every
+            # episode — use for training policies that must generalize
+            # across tracks instead of memorizing one)
+            "track": "fast",
             # Vehicles
             "controlled_vehicles": 1,
             "other_vehicles": 0,
@@ -83,7 +88,14 @@ class RacetrackFast(AbstractEnv):
             "collision_reward": -5.0,
             "lane_centering_reward":  1.0,   # weight on 1/(1+cost×lat²)
             "lane_centering_cost": 6.0,
-            "action_penalty": 0.05,
+            # Throttle-command magnitude penalty — DISABLED by default:
+            # its forward part taxes acceleration (counterproductive when
+            # speed is the objective) and its doubled reverse part just
+            # duplicates reverse_penalty while also taxing the reverse
+            # command during wall escapes (it is not escape-zone waived).
+            # Steering smoothness is handled by steering_penalty +
+            # steering_jerk_penalty, not by this term.
+            "action_penalty": 0.0,
             "speed_reward": 1.0,
             # Kept small: taxing steering too hard makes "hold throttle and
             # let the wall steer the car" score better than learning to corner
@@ -94,8 +106,10 @@ class RacetrackFast(AbstractEnv):
             "idle_penalty":     0.80,        # hit for abs(speed) < 0.5 m/s
             "idle_grace_steps":       15,   # first 15 policy steps (3 seconds) are exempt
 
-            "checkpoint_bonus":       0.25,   # bonus per segment crossing (9 segments total)
-            "lap_bonus":              0.50,   # bonus for completing a full lap
+            # Paid in RAW reward units (same scale as the weights above),
+            # added BEFORE the lmap to [0, 1]
+            "checkpoint_bonus":       1.0,    # bonus per segment crossing (9 segments total)
+            "lap_bonus":              2.0,    # bonus for completing a full lap
             "forward_velocity_reward": 0.8,
             # Misc
             "show_trajectories": False,
@@ -130,6 +144,15 @@ class RacetrackFast(AbstractEnv):
             "wall_escape_reward":   0.4,     # bonus for actively reversing from wall
             "wall_stuck_penalty":   0.4,     # penalty for sitting still at wall
             "wall_ride_penalty":    0.6,     # extra penalty ∝ speed while grinding the wall
+            # Escape zone: within this clearance of a wall, reverse/idle
+            # penalties are waived and clearance GAINED is rewarded.
+            # Without it the escape only paid while touching the wall
+            # (~0.15 m band): one step into a successful reverse, the
+            # -0.8 reverse penalty resumed — so policies learned to creep
+            # along the wall instead of backing away.
+            "wall_escape_zone":      1.0,    # [m] clearance treated as "escaping"
+            "wall_escape_progress":  0.8,    # reward per m of clearance gained in
+                                             # the zone (clipped to [-0.2, +0.4]/step)
             # Terminate after this many consecutive steps of wall contact at
             # ANY speed (7 s @ 5 Hz). Covers both the parked-against-the-wall
             # case and the grinding-along-the-wall exploit with one rule.
@@ -146,13 +169,56 @@ class RacetrackFast(AbstractEnv):
         self.lap_count          = 0
         self.episode_step       = 0
         self.wall_contact_steps = 0     # consecutive steps touching a wall (any speed)
+        self._prev_wall_gap     = None  # for escape-progress shaping
         self._make_road()
         self._make_vehicles()
 
     def _make_road(self) -> None:
+        """Build the configured track. Sets, per track:
+        self.segment_sequence — lap order for the checkpoint bonus
+        self.spawn_options    — lane keys the ego may spawn on
+        """
+        track = self.config.get("track", "fast")
+        if track == "random":
+            track = ("fast", "oval")[int(self.np_random.integers(0, 2))]
+        self.active_track = track
+        if track == "oval":
+            self._make_road_oval()
+        else:
+            self._make_road_fast()
+
+    def _make_road_oval(self) -> None:
+        """Two-lane oval: 80 m straights joined by 25/30 m half-circles.
+        Gentler than the fast circuit — used as the generalization probe
+        (train on "random", evaluate here) or as an easier curriculum."""
+        net = RoadNetwork()
+        sl = 16
+
+        net.add_lane("a", "b", StraightLane([0, 0], [80, 0], line_types=(LineType.CONTINUOUS, LineType.STRIPED), width=5, speed_limit=sl))
+        net.add_lane("a", "b", StraightLane([0, 5], [80, 5], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center1 = [80, -25]
+        net.add_lane("b", "c", CircularLane(center1, 25, np.deg2rad(90), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("b", "c", CircularLane(center1, 30, np.deg2rad(90), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        net.add_lane("c", "d", StraightLane([80, -50], [0, -50], line_types=(LineType.CONTINUOUS, LineType.NONE), width=5, speed_limit=sl))
+        net.add_lane("c", "d", StraightLane([80, -55], [0, -55], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center2 = [0, -25]
+        net.add_lane("d", "a", CircularLane(center2, 25, np.deg2rad(-90), np.deg2rad(-270), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("d", "a", CircularLane(center2, 30, np.deg2rad(-90), np.deg2rad(-270), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        self.segment_sequence = ["a", "b", "c", "d"]
+        self.spawn_options = [
+            ("a", "b", 0), ("a", "b", 1),
+            ("c", "d", 0), ("c", "d", 1),
+        ]
+        self.road = Road(network=net, np_random=self.np_random, record_history=self.config["show_trajectories"])
+
+    def _make_road_fast(self) -> None:
         net = RoadNetwork()
 
-        # A compact oval made of straights and arcs (inspired by racetrack_env)
+        # A compact circuit made of straights and arcs (inspired by racetrack_env)
         speedlimits = [None, 16, 16, 16, 16, 16, 16, 16, 16]
 
         lane = StraightLane([42, 0], [100, 0], line_types=(LineType.CONTINUOUS, LineType.STRIPED), width=5, speed_limit=speedlimits[1])
@@ -196,6 +262,13 @@ class RacetrackFast(AbstractEnv):
         net.add_lane("i", "a", CircularLane(center5, radii5 + 5, np.deg2rad(240), np.deg2rad(270), width=5, clockwise=True, line_types=(LineType.CONTINUOUS, LineType.STRIPED), speed_limit=speedlimits[8]))
         net.add_lane("i", "a", CircularLane(center5, radii5, np.deg2rad(238), np.deg2rad(268), width=5, clockwise=True, line_types=(LineType.NONE, LineType.CONTINUOUS), speed_limit=speedlimits[8]))
 
+        self.segment_sequence = list(self.SEGMENT_SEQUENCE)
+        self.spawn_options = [
+            ("a", "b", 0), ("a", "b", 1),
+            ("c", "d", 0),
+            ("f", "g", 0),
+            ("h", "i", 0),
+        ]
         self.road = Road(network=net, np_random=self.np_random, record_history=self.config["show_trajectories"])
 
     def _make_vehicles(self) -> None:
@@ -212,13 +285,7 @@ class RacetrackFast(AbstractEnv):
         ⑤ Separation    — dynamic, speed-proportional safety gap
         """
         rng = self.np_random
-        spawn_options = [
-            ("a", "b", 0),
-            ("a", "b", 1),
-            ("c", "d", 0),
-            ("f", "g", 0),
-            ("h", "i", 0),
-        ]
+        spawn_options = self.spawn_options   # set by the track builder
         spawn_idx = int(rng.integers(0, len(spawn_options)))
         spawn_lane_key = spawn_options[spawn_idx]
 
@@ -320,7 +387,7 @@ class RacetrackFast(AbstractEnv):
             if current_start == self.last_segment_start:
                 return 0.0   # still on the same segment, no bonus
 
-            seq = self.SEGMENT_SEQUENCE
+            seq = getattr(self, "segment_sequence", self.SEGMENT_SEQUENCE)
             try:
                 last_idx    = seq.index(self.last_segment_start)
                 current_idx = seq.index(current_start)
@@ -433,6 +500,17 @@ class RacetrackFast(AbstractEnv):
         else:
             self.wall_contact_steps = 0
 
+        # Escape zone: a band of clearance around the walls (wider than the
+        # ~0.15 m contact band) in which the escape manoeuvre is protected —
+        # reverse/idle penalties are waived and clearance gained is rewarded
+        wall_state = self._wall_state(self.vehicle)
+        wall_gap   = wall_state[0] if wall_state is not None else None
+        escape_zone = self.config.get("wall_escape_zone", 1.0)
+        near_wall = (
+            wall_gap is not None and wall_gap < escape_zone
+            and not self.vehicle.crashed
+        )
+
         # ── 2. Speed reward — negative for reversing, not zero ─────────
         # Forward:  [0, speed_limit] → [0.0, +1.0]
         # Reverse:  [ego_min, 0]     → [-1.0, 0.0]
@@ -490,7 +568,10 @@ class RacetrackFast(AbstractEnv):
 
         # ── Reverse and idle penalties ──────────────────────────────
         # Reverse: discrete signal so policy cannot rationalize away gradual drift
-        if at_wall:
+        # Waived in the whole escape zone, not just at contact: punishing
+        # reverse one step after it pulls the car off the wall taught the
+        # policy to creep along the wall instead of backing away.
+        if near_wall:
             reverse_penalty = 0.0
             idle_penalty    = 0.0
         else:
@@ -517,9 +598,11 @@ class RacetrackFast(AbstractEnv):
                 # Positive reward: proportional to reverse speed
                 escape_ratio       = abs(speed) / max(1.0, abs(ego_min))
                 wall_escape_reward = self.config.get("wall_escape_reward", 0.6) * escape_ratio
-            elif throttle < -0.2:
+            elif throttle < -0.2 and speed < 1.0:
                 # Policy commands reverse but speed not negative yet
-                # (car just started reversing this step)
+                # (car just started reversing this step). The speed guard
+                # stops wall-grinding at speed from dodging the ride penalty
+                # by merely HOLDING reverse throttle while momentum carries it
                 wall_escape_reward = self.config.get("wall_escape_reward", 0.6) * 0.3
             else:
                 # At wall, not reversing → penalty; grows with speed so
@@ -530,18 +613,33 @@ class RacetrackFast(AbstractEnv):
                     + self.config.get("wall_ride_penalty", 0.6) * ride
                 )
 
+        # ── Escape-progress shaping ─────────────────────────────────────
+        # Pays for clearance GAINED while inside the escape zone (and mildly
+        # charges clearance lost), so the reward keeps flowing through the
+        # whole reverse-out manoeuvre, not only while touching the wall.
+        # Asymmetric clip: escaping earns up to +0.4/step, approaching costs
+        # at most -0.2 (contact itself is already penalised above).
+        if near_wall and wall_gap is not None:
+            prev_gap = self._prev_wall_gap if self._prev_wall_gap is not None else wall_gap
+            gap_delta = (float(np.clip(wall_gap, 0.0, escape_zone))
+                         - float(np.clip(prev_gap, 0.0, escape_zone)))
+            wall_escape_reward += float(np.clip(
+                self.config.get("wall_escape_progress", 0.8) * gap_delta,
+                -0.2, 0.4))
+        self._prev_wall_gap = wall_gap
+
 
         # ──  Compose base reward ─────────────────────────────────────
         reward = (
             lane_centering   # [0, 1]        stay on road, stay centered
-            + speed_reward   # [-0.6, +0.6]  go forward, don't reverse
-            + forward_vel_reward
-            + action_penalty # [-0.3, 0]     don't over-throttle backward
-            + steering_cost  # [-0.15, 0]    smooth steering
-            + jerk_penalty  
+            + speed_reward   # [-1, +1]      go forward, don't reverse
+            + forward_vel_reward  # [-0.4, +0.8]  (proj capped by |ego_min|=8 in reverse)
+            + action_penalty # 0 by default (redundant with reverse_penalty)
+            + steering_cost  # [-0.1, 0]     smooth steering
+            + jerk_penalty   # [-0.4, 0]     no steering direction flips
             + reverse_penalty# [-0.8, 0]     discrete reverse hit
-            + idle_penalty   # [-0.4, 0]     discrete idle hit
-            + wall_escape_reward
+            + idle_penalty   # [-0.8, 0]     discrete idle hit (exclusive with reverse)
+            + wall_escape_reward  # [-1.2, +0.8] incl. escape-progress shaping
         )
 
         # ── Crash penalty — overrides everything including offroad ───
@@ -561,15 +659,23 @@ class RacetrackFast(AbstractEnv):
             # contact, which only means clearance ≈ 0) → terminate signal
             reward = self.config.get("collision_reward", -5.0)
 
-        # ── Map to [0, 1] ────────────────────────────────────────────
-        # clip_range covers normal operation: base reward ∈ [-3, 3]
-        # collision_reward=-5.0 gets clipped to 0.0 (minimum)
-        reward = float(utils.lmap(reward, [-3.0, 3.0], [0.0, 1.0]))
-
         # Fires once per new segment entered in the correct lap direction.
-        # Pays in [0,1] space directly so it is always meaningful regardless of base reward.
-        reward = float(np.clip(reward + self._checkpoint_bonus(), 0.0, 1.0))
-        return reward
+        # Paid in RAW reward units so the config values are comparable to the
+        # other weights. (Previously added after the lmap, in [0,1] space,
+        # which silently made each unit of bonus worth 6 raw units.)
+        reward += self._checkpoint_bonus()
+
+        # ── Map to [0, 1] ────────────────────────────────────────────
+        # Range must cover the true bounds of the composed reward, otherwise
+        # distinct bad states saturate to 0 after the final clip and lose
+        # their gradient. With the current weights: worst ordinary step
+        # ≈ -2.8 (full reverse + jerk + reverse penalty, off-center), best
+        # ≈ +2.8 — re-derive these bounds whenever a weight changes.
+        # collision_reward=-5.0 maps below 0 and clips to 0.0; checkpoint/
+        # lap steps may exceed +3 and clip to 1.0 — intentional, the
+        # milestone step is allowed to saturate.
+        reward = float(utils.lmap(reward, [-3.0, 3.0], [0.0, 1.0]))
+        return float(np.clip(reward, 0.0, 1.0))
     
     def _is_terminated(self) -> bool:
         if self.vehicle.crashed:

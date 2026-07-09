@@ -10,11 +10,12 @@ output is **bit-identical** to the Python environment.
 
 | File | What it is |
 |---|---|
-| `RacetrackObservation.cs` | The full game-side script. Engine-agnostic C# (only `System.*`): lane math, track (hardcoded + JSON loader), observation builder, 5 Hz update driver, HWC reorder, `Frame2D`, action decoder. |
-| `HighwayObservationBuilder.cs` | **Single-file alternative**: one class, `Vector3`-based `Vehicle` inputs, track geometry embedded, lat_off/ang_off/on_road fully implemented. No JSON, no other files. Pick this OR `RacetrackObservation.cs`, not both. Its header lists the 8 contract rules that naive implementations get wrong. |
+| `RacetrackObservation.cs` | The full game-side script. Engine-agnostic C# (only `System.*`): lane math, track (hardcoded + JSON loader), observation builder, 5 Hz update driver, CHW reorder, `Frame2D`, action decoder. |
+| `HighwayObservationBuilder.cs` | **Single-file alternative**: one class, `Vector3`-based `Vehicle` inputs, lat_off/ang_off/on_road fully implemented. Lanes are constructed by the caller (`Lane.Straight(x1,y1,x2,y2)`, `Lane.Arc(cx,cy,radius,phase0,phase1,clockwise)` in radians, `Lane.ArcDegrees(...)`) and passed to the constructor; `RacetrackFastLanes()` returns the built-in copy of the training track. Pick this OR `RacetrackObservation.cs`, not both. Its header lists the contract rules that naive implementations get wrong. |
 | `track.json` | The 18 lane centerlines of the current track, exported from the live Python env. Load with your engine's JSON parser into `TrackData` → `Track.FromData(...)`. |
 | `reference_obs.json` | Ground-truth observations dumped from the real highway-env for 4 test scenarios. Unit-test data for the C# port. |
 | `export_track_json.py` | Regenerates the two JSONs from `race_env.py`. **Re-run after any change to the track or observation config.** |
+| `convert_onnx_nhwc.py` | Rewrites a channels-first actor export (`[1,10,12,12]`) into the engine layout (`[1,12,12,10]` NHWC) by prepending a Transpose. Verifies output equivalence. |
 | `verify/` | .NET console harness (`dotnet run -- ..`) that rebuilds every reference scenario with the C# code and diffs it against Python. Currently: max diff 0.0 on all scenarios. |
 
 ## Quick start (game side)
@@ -37,7 +38,7 @@ foreach (var car in otherCars)                     // other car components
 
 if (updater.Update(deltaTime, ego, npcs))          // true every 0.2 s (5 Hz)
 {
-    onnx.Run(updater.ObsCHW);                      // input "obs" [1,10,12,12]
+    onnx.Run(updater.ObsHWC);                      // input [1,12,12,10] HWC
     ActionDecoder.Decode(onnx.Output, out accel, out steer);
 }
 ApplyAction(accel, steer);                         // hold action between ticks
@@ -46,14 +47,21 @@ ApplyAction(accel, steer);                         // hold action between ticks
 - Inference cadence is **5 Hz** (`policy_frequency` in training). `Update`
   accumulates `deltaTime` and fires every 0.2 s; hold the last action on all
   other ticks.
-- `ObsCHW` is the model input layout `[1, 10, 12, 12]` (channels-first).
-- `ObsHWC` is the same data as `[H=12, W=12, C=10]` — **only** for tensor
-  APIs that are channels-last and do their own layout mapping. Feeding the
-  HWC array into the CHW-shaped ONNX input scrambles every channel.
+- `ObsHWC` is the model input layout `[H=12, W=12, C=10]` (channels-last
+  sequence, flat index `(ix*12 + iy)*10 + f`). Deploy it with
+  **`ppo_actor_only_nhwc.onnx`** (exported by the notebook, or produced
+  from any channels-first actor export via `convert_onnx_nhwc.py`).
+  Feeding the HWC sequence into the channels-first export scrambles every
+  channel — the policy degenerates to near-constant outputs (throttle
+  ~0.4, steering ~0.2) and cannot corner.
+- `ObsCHW` is the same data reordered to `[1, 10, 12, 12]` (channels-first)
+  — the layout of the notebook's raw `torch.onnx` export. Feeding one
+  layout into the other's input scrambles every channel, so pick the one
+  your inference API expects.
 
 ## The observation contract
 
-Tensor: `float32 [1, 10, 12, 12]`, flat index `f*144 + ix*12 + iy`.
+Tensor: `float32 [1, 12, 12, 10]` (HWC), flat index `(ix*12 + iy)*10 + f`.
 
 - `ix` = longitudinal cell: grid covers **−9 m (behind) … +27 m (ahead)** of
   the ego, 3 m per cell (forward-biased view).
@@ -167,7 +175,8 @@ data**, because `x/y/vx/vy/cos_h/sin_h` are frame-dependent values.
 
 ## Running the model
 
-- Input `"obs"`: `[1, 10, 12, 12] float32` — `ObservationUpdater.ObsCHW`.
+- Input: `[1, 12, 12, 10] float32` HWC — `ObservationUpdater.ObsHWC`
+  (`ObsCHW` provides `[1, 10, 12, 12]` for a channels-first model).
 - Output `"action_mean"`: `[1, 2] float32`, the **unclipped** Gaussian mean.
 - Decode (in `ActionDecoder`): clamp to `[−1, 1]`, then
   `acceleration = a[0] × 5.0` m/s² (`acceleration_range [−5, 5]`) and
@@ -186,8 +195,8 @@ data**, because `x/y/vx/vy/cos_h/sin_h` are frame-dependent values.
 | `StraightLane`, `CircularLane` | The two geometry types used by the track. `CircularLane` keeps highway-env's `direction = clockwise ? 1 : −1` sign conventions. |
 | `TrackLaneData`, `TrackData` | Serializable DTOs matching `track.json`. |
 | `Track` | Lane container. `BuildRacetrackFast()`, `FromData()`, `ClosestLane(pos, heading)`, `LaneOffsets(vehicle)`. |
-| `OccupancyGridBuilder` | The core. `Build`/`BuildInto` produce the CHW tensor; `ChwToHwc` reorders; all training constants at the top of the class. |
-| `ObservationUpdater` | Per-frame driver: 5 Hz gate (`Update`), owns `ObsCHW`/`ObsHWC` buffers, `Refresh` to force a rebuild. |
+| `OccupancyGridBuilder` | The core. `Build`/`BuildInto` produce the HWC tensor; `HwcToChw` reorders; all training constants at the top of the class. |
+| `ObservationUpdater` | Per-frame driver: 5 Hz gate (`Update`), owns `ObsHWC`/`ObsCHW` buffers, `Refresh` to force a rebuild. |
 | `ActionDecoder` | `action_mean → (acceleration m/s², steering rad)`. |
 
 ## Verification workflow
@@ -200,7 +209,7 @@ python export_track_json.py
 dotnet run -- ..
 ```
 
-Expected output: `PASS ... maxDiff=0.00E+000 hwc=ok` for every scenario and
+Expected output: `PASS ... maxDiff=0.00E+000 chw=ok` for every scenario and
 both track sources, then `ALL SCENARIOS MATCH`.
 
 **Re-run both steps whenever you change any of these in `race_env.py`:**
