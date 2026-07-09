@@ -1,0 +1,220 @@
+{
+ "lanes": [
+  {
+   "type": "straight",
+   "start": [
+    42.0,
+    0.0
+   ],
+   "end": [
+    100.0,
+    0.0
+   ],
+   "width": 5.0
+  },
+  {
+   "type": "straight",
+   "start": [
+    42.0,
+    5.0
+   ],
+   "end": [
+    100.0,
+    5.0
+   ],
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    100.0,
+    -20.0
+   ],
+   "radius": 20.0,
+   "start_phase": 1.5707963267948966,
+   "end_phase": -0.017453292519943295,
+   "clockwise": false,
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    100.0,
+    -20.0
+   ],
+   "radius": 25.0,
+   "start_phase": 1.5707963267948966,
+   "end_phase": -0.017453292519943295,
+   "clockwise": false,
+   "width": 5.0
+  },
+  {
+   "type": "straight",
+   "start": [
+    120.0,
+    -19.0
+   ],
+   "end": [
+    120.0,
+    -30.0
+   ],
+   "width": 5.0
+  },
+  {
+   "type": "straight",
+   "start": [
+    125.0,
+    -19.0
+   ],
+   "end": [
+    125.0,
+    -30.0
+   ],
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    105.0,
+    -30.0
+   ],
+   "radius": 15.0,
+   "start_phase": 0.0,
+   "end_phase": -3.1590459461097367,
+   "clockwise": false,
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    105.0,
+    -30.0
+   ],
+   "radius": 20.0,
+   "start_phase": 0.0,
+   "end_phase": -3.1590459461097367,
+   "clockwise": false,
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    70.0,
+    -30.0
+   ],
+   "radius": 20.0,
+   "start_phase": 0.0,
+   "end_phase": 2.3736477827122884,
+   "clockwise": true,
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    70.0,
+    -30.0
+   ],
+   "radius": 15.0,
+   "start_phase": 0.0,
+   "end_phase": 2.3911010752322315,
+   "clockwise": true,
+   "width": 5.0
+  },
+  {
+   "type": "straight",
+   "start": [
+    55.7,
+    -15.7
+   ],
+   "end": [
+    35.7,
+    -35.7
+   ],
+   "width": 5.0
+  },
+  {
+   "type": "straight",
+   "start": [
+    59.23553,
+    -19.23553
+   ],
+   "end": [
+    39.23553,
+    -39.23553
+   ],
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    18.1,
+    -18.1
+   ],
+   "radius": 25.0,
+   "start_phase": 5.497787143782138,
+   "end_phase": 2.9670597283903604,
+   "clockwise": false,
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    18.1,
+    -18.1
+   ],
+   "radius": 30.0,
+   "start_phase": 5.497787143782138,
+   "end_phase": 2.8797932657906435,
+   "clockwise": false,
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    18.1,
+    -18.1
+   ],
+   "radius": 25.0,
+   "start_phase": 2.9670597283903604,
+   "end_phase": 0.9773843811168246,
+   "clockwise": false,
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    18.1,
+    -18.1
+   ],
+   "radius": 30.0,
+   "start_phase": 2.9670597283903604,
+   "end_phase": 1.0122909661567112,
+   "clockwise": false,
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    43.2,
+    23.4
+   ],
+   "radius": 23.5,
+   "start_phase": 4.1887902047863905,
+   "end_phase": 4.71238898038469,
+   "clockwise": true,
+   "width": 5.0
+  },
+  {
+   "type": "circular",
+   "center": [
+    43.2,
+    23.4
+   ],
+   "radius": 18.5,
+   "start_phase": 4.153883619746504,
+   "end_phase": 4.6774823953448035,
+   "clockwise": true,
+   "width": 5.0
+  }
+ ]
+}

@@ -1,0 +1,15 @@
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\bin\Release\net10.0\verify.exe
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\bin\Release\net10.0\verify.deps.json
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\bin\Release\net10.0\verify.runtimeconfig.json
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\bin\Release\net10.0\verify.dll
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\bin\Release\net10.0\verify.pdb
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\obj\Release\net10.0\verify.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\obj\Release\net10.0\verify.AssemblyInfoInputs.cache
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\obj\Release\net10.0\verify.AssemblyInfo.cs
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\obj\Release\net10.0\verify.csproj.CoreCompileInputs.cache
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\obj\Release\net10.0\verify.sourcelink.json
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\obj\Release\net10.0\verify.dll
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\obj\Release\net10.0\refint\verify.dll
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\obj\Release\net10.0\verify.pdb
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\obj\Release\net10.0\verify.genruntimeconfig.cache
+C:\Users\16469\Desktop\circuit\racetrack-agents\re_engine\verify\obj\Release\net10.0\ref\verify.dll

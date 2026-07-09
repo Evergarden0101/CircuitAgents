@@ -1,0 +1,224 @@
+# RE Engine / C# Observation Pipeline for the RacetrackFast PPO Model
+
+This folder contains everything needed to run the trained PPO agent
+(`ppo_actor_only.onnx`) inside a C# game engine (RE Engine, Unity-like):
+a faithful C# port of the observation builder the model was trained on,
+the track geometry as data, and a verification harness proving the C#
+output is **bit-identical** to the Python environment.
+
+## Files
+
+| File | What it is |
+|---|---|
+| `RacetrackObservation.cs` | The full game-side script. Engine-agnostic C# (only `System.*`): lane math, track (hardcoded + JSON loader), observation builder, 5 Hz update driver, HWC reorder, `Frame2D`, action decoder. |
+| `HighwayObservationBuilder.cs` | **Single-file alternative**: one class, `Vector3`-based `Vehicle` inputs, track geometry embedded, lat_off/ang_off/on_road fully implemented. No JSON, no other files. Pick this OR `RacetrackObservation.cs`, not both. Its header lists the 8 contract rules that naive implementations get wrong. |
+| `track.json` | The 18 lane centerlines of the current track, exported from the live Python env. Load with your engine's JSON parser into `TrackData` → `Track.FromData(...)`. |
+| `reference_obs.json` | Ground-truth observations dumped from the real highway-env for 4 test scenarios. Unit-test data for the C# port. |
+| `export_track_json.py` | Regenerates the two JSONs from `race_env.py`. **Re-run after any change to the track or observation config.** |
+| `verify/` | .NET console harness (`dotnet run -- ..`) that rebuilds every reference scenario with the C# code and diffs it against Python. Currently: max diff 0.0 on all scenarios. |
+
+## Quick start (game side)
+
+```csharp
+// once, at level load ------------------------------------------------------
+Track track = Track.BuildRacetrackFast();          // or Track.FromData(json)
+ObservationUpdater updater = new ObservationUpdater(track);
+List<VehicleState> npcs = new List<VehicleState>();
+
+// every physics tick -------------------------------------------------------
+VehicleState ego = new VehicleState(
+    tf.position.x, tf.position.z,                  // track x, y  (see frames)
+    rb.velocity.x, rb.velocity.z,
+    Math.Atan2(tf.forward.z, tf.forward.x));       // heading [rad]
+
+npcs.Clear();
+foreach (var car in otherCars)                     // other car components
+    npcs.Add(new VehicleState(/* same five fields from its transform */));
+
+if (updater.Update(deltaTime, ego, npcs))          // true every 0.2 s (5 Hz)
+{
+    onnx.Run(updater.ObsCHW);                      // input "obs" [1,10,12,12]
+    ActionDecoder.Decode(onnx.Output, out accel, out steer);
+}
+ApplyAction(accel, steer);                         // hold action between ticks
+```
+
+- Inference cadence is **5 Hz** (`policy_frequency` in training). `Update`
+  accumulates `deltaTime` and fires every 0.2 s; hold the last action on all
+  other ticks.
+- `ObsCHW` is the model input layout `[1, 10, 12, 12]` (channels-first).
+- `ObsHWC` is the same data as `[H=12, W=12, C=10]` — **only** for tensor
+  APIs that are channels-last and do their own layout mapping. Feeding the
+  HWC array into the CHW-shaped ONNX input scrambles every channel.
+
+## The observation contract
+
+Tensor: `float32 [1, 10, 12, 12]`, flat index `f*144 + ix*12 + iy`.
+
+- `ix` = longitudinal cell: grid covers **−9 m (behind) … +27 m (ahead)** of
+  the ego, 3 m per cell (forward-biased view).
+- `iy` = lateral cell: **−18 m … +18 m**, 3 m per cell.
+- The grid is **ego-aligned** (`align_to_vehicle_axes=True`): it rotates with
+  the car. The ego always sits at cell **(3, 6)**.
+
+| ch | feature | value written at a vehicle's cell | normalization |
+|---|---|---|---|
+| 0 | `presence` | 1 | — |
+| 1 | `on_road`  | 1 where a **lane centerline** crosses the cell (see below) | — |
+| 2 | `x`  | `v.x − ego.x` in **track axes** (not rotated!) | ÷ 100 |
+| 3 | `y`  | `v.y − ego.y` in track axes | ÷ 100 |
+| 4 | `vx` | `v.vx − ego.vx` in track axes | ÷ 20 |
+| 5 | `vy` | `v.vy − ego.vy` in track axes | ÷ 20 |
+| 6 | `cos_h` | `cos(v.heading)` — **absolute** heading | — |
+| 7 | `sin_h` | `sin(v.heading)` | — |
+| 8 | `lat_off` | v's lateral offset from **its own** closest lane centerline | ÷ 4 |
+| 9 | `ang_off` | `wrap(v.heading − lane heading at v)` | ÷ 3.14159 |
+
+Rules that must not be "fixed" (the model was trained on them):
+
+- Only the **cell index** is rotated into the ego frame. The **values** of
+  `x, y, vx, vy` stay in world/track axes, and `cos_h/sin_h` are absolute.
+- Vehicles are written **NPCs first, ego last**, so the ego wins its own cell
+  (highway-env iterates `road.vehicles` reversed; ego is `vehicles[0]`).
+- Cells without a vehicle stay **0** in every vehicle channel (numpy fills
+  NaN, then `nan_to_num → 0`). A vehicle more than ~40 m away simply falls
+  outside the grid and writes nothing.
+- Every written value is clipped to **[−1, 1]**.
+
+## How `on_road` works (and why you must NOT raycast)
+
+`on_road` is a **centerline trace**, not a road-surface mask:
+
+1. For each of the 18 lanes, project the ego onto the lane → longitudinal `s0`.
+2. Walk waypoints `s = s0−100 … s0+100` in **3 m** steps, clamped to
+   `[0, lane.length]`. Each waypoint is the point on the lane **centerline**.
+3. Rotate each waypoint into the ego frame, bin it into a cell, set the cell
+   to 1. Everything else stays 0 — including the asphalt *between* the two
+   centerlines.
+
+What the network actually sees (real observation, ego at the `>` row,
+driving toward the top of the page):
+
+```
+......##....      ← the two ## columns are the TWO LANE CENTERLINES
+#.....##....        of the corridor the ego is on (1 per lane)
+.#....##....  >     ego row
+###...##....      ← the left-side #s are another part of the track
+#.#...##....        (the return leg) entering the 27 m forward preview
+```
+
+A raycast/collider approach would mark the full ~10 m road width — a solid
+band ~3 cells wide. The model has **never seen that picture**; it would
+silently degrade. No coverage percentages either: the layer is binary.
+Since lane geometry is required for `lat_off`/`ang_off` anyway, the C#
+computes `on_road` from the same lanes for free.
+
+### `presence` vs `on_road`
+
+Different layers. `presence` needs **no lanes, no rays**: for each vehicle
+(ego included), compute its cell and write 1 — literally "check the positions
+of the cars". `on_road` describes where the *track* is; `presence` where the
+*cars* are. The network needs both to tell "empty road ahead" from "car ahead".
+
+## `lat_off` / `ang_off` without an in-game lane system
+
+You only need lane **centerline math** (no colliders). For a vehicle at
+position `p` with heading `h`:
+
+1. **Closest lane** = argmin over all lanes of
+   `|lat| + max(s−len, 0) + max(−s, 0) + 1.0·|wrap(h − laneHeading(s))|`
+   — note the heading term; highway-env selects the lane with it
+   (`distance_with_heading`), and skipping it changes which lane wins at
+   segment overlaps.
+2. `lat_off` = signed lateral offset from that lane's centerline.
+3. `ang_off` = `wrap(h − laneHeading(s))`.
+
+Two ways to get the lanes (both implemented, both verified identical):
+
+- **Hardcoded**: `Track.BuildRacetrackFast()` — a line-by-line copy of
+  `race_env._make_road()` (straight segments by endpoints, arcs by
+  center/radius/phases/direction, like "set point and radius").
+- **Data-driven**: `track.json` → `TrackData` → `Track.FromData(...)`.
+
+### `track.json` schema
+
+```json
+{ "lanes": [
+  { "type": "straight", "start": [42.0, 0.0], "end": [100.0, 0.0], "width": 5.0 },
+  { "type": "circular", "center": [100.0, -20.0], "radius": 20.0,
+    "start_phase": 1.5707, "end_phase": -0.01745, "clockwise": false, "width": 5.0 }
+] }
+```
+
+Phases are radians; `clockwise` maps to highway-env's `direction = 1`.
+Lane order matters only for tie-breaking in closest-lane search — keep the
+exported order.
+
+## Coordinate frames
+
+highway-env is 2D. Map your game's ground plane consistently, e.g. Y-up
+engines: `track.x = world.X`, `track.y = world.Z`,
+`heading = Atan2(forward.Z, forward.X)`, velocity from the rigidbody's
+X/Z components. The track data is authored in `race_env.py` coordinates —
+either build the game track at those coordinates or convert with the
+`Frame2D` helper (origin shift + yaw + optional `MirrorY` for handedness).
+All five `VehicleState` fields must be in the **same frame as the track
+data**, because `x/y/vx/vy/cos_h/sin_h` are frame-dependent values.
+
+## Running the model
+
+- Input `"obs"`: `[1, 10, 12, 12] float32` — `ObservationUpdater.ObsCHW`.
+- Output `"action_mean"`: `[1, 2] float32`, the **unclipped** Gaussian mean.
+- Decode (in `ActionDecoder`): clamp to `[−1, 1]`, then
+  `acceleration = a[0] × 5.0` m/s² (`acceleration_range [−5, 5]`) and
+  `steering = a[1] × π/6` rad front-wheel angle (`steering_range ±30°`).
+- Positive steering turns toward +lateral (+y in track axes). Verify the
+  sign once in-game; `Frame2D.MirrorY` fixes a flipped-handedness setup.
+
+## Class reference (RacetrackObservation.cs)
+
+| Type | Purpose |
+|---|---|
+| `HwMath` | `WrapToPi` (numpy-compatible), `Lmap` (linear map, no clip), `Clamp1`. |
+| `Vec2`, `VehicleState` | Plain 2D structs. `VehicleState` = position, velocity, heading in track frame. |
+| `Frame2D` | Optional game-frame → track-frame converter (origin, yaw, mirror). |
+| `Lane` (abstract) | `LocalCoordinates`, `PositionAt`, `HeadingAt`, `Distance`, `DistanceWithHeading` — exact ports of highway-env `AbstractLane`. |
+| `StraightLane`, `CircularLane` | The two geometry types used by the track. `CircularLane` keeps highway-env's `direction = clockwise ? 1 : −1` sign conventions. |
+| `TrackLaneData`, `TrackData` | Serializable DTOs matching `track.json`. |
+| `Track` | Lane container. `BuildRacetrackFast()`, `FromData()`, `ClosestLane(pos, heading)`, `LaneOffsets(vehicle)`. |
+| `OccupancyGridBuilder` | The core. `Build`/`BuildInto` produce the CHW tensor; `ChwToHwc` reorders; all training constants at the top of the class. |
+| `ObservationUpdater` | Per-frame driver: 5 Hz gate (`Update`), owns `ObsCHW`/`ObsHWC` buffers, `Refresh` to force a rebuild. |
+| `ActionDecoder` | `action_mean → (acceleration m/s², steering rad)`. |
+
+## Verification workflow
+
+```
+# 1. regenerate data from the current race_env.py  (circuit conda env)
+python export_track_json.py
+
+# 2. rebuild + diff the C# against Python (from re_engine/verify)
+dotnet run -- ..
+```
+
+Expected output: `PASS ... maxDiff=0.00E+000 hwc=ok` for every scenario and
+both track sources, then `ALL SCENARIOS MATCH`.
+
+**Re-run both steps whenever you change any of these in `race_env.py`:**
+track geometry (`_make_road`), `grid_size`/`grid_step`, the feature list or
+`features_range`, `acceleration_range`/`steering_range` (also update
+`ActionDecoder`), or `policy_frequency` (also update
+`ObservationUpdater.PolicyPeriod`). The constants live at the top of
+`OccupancyGridBuilder` — they are duplicated from Python **by design** and
+must be kept in sync manually.
+
+## Gotchas
+
+- **Retrain ↔ redeploy**: an ONNX file is only valid for the exact
+  observation/action config it was trained with. After retraining with new
+  configs, refresh the constants, the JSONs, and re-verify.
+- **float32 everywhere** at the model boundary; internal math is double.
+- Two NPCs in the same cell: the later-written one wins. Python's order is
+  reversed `road.vehicles`; among NPCs this is effectively arbitrary — only
+  the *ego last* rule matters in practice.
+- The `verify/` harness and JSON files never ship in the game; only
+  `RacetrackObservation.cs` (plus `track.json` if you load lanes from data).
