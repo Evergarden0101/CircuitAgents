@@ -464,5 +464,110 @@ namespace RacetrackSingle
                 Lane.ArcDegrees(43.2, 23.4, 18.5, 238, 268, true),
             };
         }
+
+        // Copy of race_env._make_road_oval(): 80 m straights + 25/30 m
+        // half-circles.
+        public static Lane[] OvalLanes()
+        {
+            return new Lane[]
+            {
+                // a -> b
+                Lane.Straight(0, 0, 80, 0),
+                Lane.Straight(0, 5, 80, 5),
+                // b -> c
+                Lane.ArcDegrees(80, -25, 25, 90, -90, false),
+                Lane.ArcDegrees(80, -25, 30, 90, -90, false),
+                // c -> d
+                Lane.Straight(80, -50, 0, -50),
+                Lane.Straight(80, -55, 0, -55),
+                // d -> a
+                Lane.ArcDegrees(0, -25, 25, -90, -270, false),
+                Lane.ArcDegrees(0, -25, 30, -90, -270, false),
+            };
+        }
+
+        // Copy of race_env._make_road_stadium(): 120 m straights + 30/35 m
+        // half-circles (high-speed track).
+        public static Lane[] StadiumLanes()
+        {
+            return new Lane[]
+            {
+                // a -> b
+                Lane.Straight(0, 0, 120, 0),
+                Lane.Straight(0, 5, 120, 5),
+                // b -> c
+                Lane.ArcDegrees(120, -30, 30, 90, -90, false),
+                Lane.ArcDegrees(120, -30, 35, 90, -90, false),
+                // c -> d
+                Lane.Straight(120, -60, 0, -60),
+                Lane.Straight(120, -65, 0, -65),
+                // d -> a
+                Lane.ArcDegrees(0, -30, 30, -90, -270, false),
+                Lane.ArcDegrees(0, -30, 35, -90, -270, false),
+            };
+        }
+
+        // Copy of race_env._make_road_rect(): rounded rectangle, four 90°
+        // corners of radius 20/25.
+        public static Lane[] RectLanes()
+        {
+            return new Lane[]
+            {
+                // a -> b
+                Lane.Straight(0, 0, 60, 0),
+                Lane.Straight(0, 5, 60, 5),
+                // b -> c
+                Lane.ArcDegrees(60, -20, 20, 90, 0, false),
+                Lane.ArcDegrees(60, -20, 25, 90, 0, false),
+                // c -> d
+                Lane.Straight(80, -20, 80, -40),
+                Lane.Straight(85, -20, 85, -40),
+                // d -> e
+                Lane.ArcDegrees(60, -40, 20, 0, -90, false),
+                Lane.ArcDegrees(60, -40, 25, 0, -90, false),
+                // e -> f
+                Lane.Straight(60, -60, 0, -60),
+                Lane.Straight(60, -65, 0, -65),
+                // f -> g
+                Lane.ArcDegrees(0, -40, 20, -90, -180, false),
+                Lane.ArcDegrees(0, -40, 25, -90, -180, false),
+                // g -> h
+                Lane.Straight(-20, -40, -20, -20),
+                Lane.Straight(-25, -40, -25, -20),
+                // h -> a
+                Lane.ArcDegrees(0, -20, 20, -180, -270, false),
+                Lane.ArcDegrees(0, -20, 25, -180, -270, false),
+            };
+        }
+
+        // Copy of race_env._make_road_chicane(): oval with a left-right S
+        // kink (10/15 m radii) in the bottom straight.
+        public static Lane[] ChicaneLanes()
+        {
+            return new Lane[]
+            {
+                // a -> b
+                Lane.Straight(0, 0, 80, 0),
+                Lane.Straight(0, 5, 80, 5),
+                // b -> c
+                Lane.ArcDegrees(80, -25, 25, 90, -90, false),
+                Lane.ArcDegrees(80, -25, 30, 90, -90, false),
+                // c -> d
+                Lane.Straight(80, -50, 55, -50),
+                Lane.Straight(80, -55, 55, -55),
+                // d -> e  (clockwise: lane 0 is the OUTER radius)
+                Lane.ArcDegrees(55, -65, 15, 90, 180, true),
+                Lane.ArcDegrees(55, -65, 10, 90, 180, true),
+                // e -> f
+                Lane.ArcDegrees(25, -65, 15, 0, -90, false),
+                Lane.ArcDegrees(25, -65, 20, 0, -90, false),
+                // f -> g
+                Lane.Straight(25, -80, 0, -80),
+                Lane.Straight(25, -85, 0, -85),
+                // g -> a
+                Lane.ArcDegrees(0, -40, 40, -90, -270, false),
+                Lane.ArcDegrees(0, -40, 45, -90, -270, false),
+            };
+        }
     }
 }

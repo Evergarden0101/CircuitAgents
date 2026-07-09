@@ -72,9 +72,12 @@ class RacetrackFast(AbstractEnv):
             "screen_height": 1000,
             "centering_position": [0.5, 0.5],
             # Track selection: "fast" (9-segment circuit), "oval"
-            # (2 straights + 2 half-circles), or "random" (new choice every
-            # episode — use for training policies that must generalize
-            # across tracks instead of memorizing one)
+            # (2 straights + 2 half-circles), "stadium" (long oval, high
+            # speed), "rect" (rounded rectangle, four 90° corners),
+            # "chicane" (oval with a left-right S kink — the only track
+            # besides "fast" with both turn directions), or "random"
+            # (new choice every episode — use for training policies that
+            # must generalize across tracks instead of memorizing one)
             "track": "fast",
             # Vehicles
             "controlled_vehicles": 1,
@@ -180,12 +183,16 @@ class RacetrackFast(AbstractEnv):
         """
         track = self.config.get("track", "fast")
         if track == "random":
-            track = ("fast", "oval")[int(self.np_random.integers(0, 2))]
+            options = ("fast", "oval", "stadium", "rect", "chicane")
+            track = options[int(self.np_random.integers(0, len(options)))]
         self.active_track = track
-        if track == "oval":
-            self._make_road_oval()
-        else:
-            self._make_road_fast()
+        builders = {
+            "oval": self._make_road_oval,
+            "stadium": self._make_road_stadium,
+            "rect": self._make_road_rect,
+            "chicane": self._make_road_chicane,
+        }
+        builders.get(track, self._make_road_fast)()
 
     def _make_road_oval(self) -> None:
         """Two-lane oval: 80 m straights joined by 25/30 m half-circles.
@@ -212,6 +219,116 @@ class RacetrackFast(AbstractEnv):
         self.spawn_options = [
             ("a", "b", 0), ("a", "b", 1),
             ("c", "d", 0), ("c", "d", 1),
+        ]
+        self.road = Road(network=net, np_random=self.np_random, record_history=self.config["show_trajectories"])
+
+    def _make_road_stadium(self) -> None:
+        """High-speed oval: 120 m straights joined by 30/35 m half-circles.
+        The gentlest track — corners are takeable near the speed limit."""
+        net = RoadNetwork()
+        sl = 16
+
+        net.add_lane("a", "b", StraightLane([0, 0], [120, 0], line_types=(LineType.CONTINUOUS, LineType.STRIPED), width=5, speed_limit=sl))
+        net.add_lane("a", "b", StraightLane([0, 5], [120, 5], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center1 = [120, -30]
+        net.add_lane("b", "c", CircularLane(center1, 30, np.deg2rad(90), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("b", "c", CircularLane(center1, 35, np.deg2rad(90), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        net.add_lane("c", "d", StraightLane([120, -60], [0, -60], line_types=(LineType.CONTINUOUS, LineType.NONE), width=5, speed_limit=sl))
+        net.add_lane("c", "d", StraightLane([120, -65], [0, -65], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center2 = [0, -30]
+        net.add_lane("d", "a", CircularLane(center2, 30, np.deg2rad(-90), np.deg2rad(-270), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("d", "a", CircularLane(center2, 35, np.deg2rad(-90), np.deg2rad(-270), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        self.segment_sequence = ["a", "b", "c", "d"]
+        self.spawn_options = [
+            ("a", "b", 0), ("a", "b", 1),
+            ("c", "d", 0), ("c", "d", 1),
+        ]
+        self.road = Road(network=net, np_random=self.np_random, record_history=self.config["show_trajectories"])
+
+    def _make_road_rect(self) -> None:
+        """Rounded rectangle: 60/20 m straights joined by four 20/25 m
+        quarter-circles — teaches repeated identical 90° corners."""
+        net = RoadNetwork()
+        sl = 16
+
+        net.add_lane("a", "b", StraightLane([0, 0], [60, 0], line_types=(LineType.CONTINUOUS, LineType.STRIPED), width=5, speed_limit=sl))
+        net.add_lane("a", "b", StraightLane([0, 5], [60, 5], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center1 = [60, -20]
+        net.add_lane("b", "c", CircularLane(center1, 20, np.deg2rad(90), np.deg2rad(0), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("b", "c", CircularLane(center1, 25, np.deg2rad(90), np.deg2rad(0), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        net.add_lane("c", "d", StraightLane([80, -20], [80, -40], line_types=(LineType.CONTINUOUS, LineType.NONE), width=5, speed_limit=sl))
+        net.add_lane("c", "d", StraightLane([85, -20], [85, -40], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center2 = [60, -40]
+        net.add_lane("d", "e", CircularLane(center2, 20, np.deg2rad(0), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("d", "e", CircularLane(center2, 25, np.deg2rad(0), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        net.add_lane("e", "f", StraightLane([60, -60], [0, -60], line_types=(LineType.CONTINUOUS, LineType.NONE), width=5, speed_limit=sl))
+        net.add_lane("e", "f", StraightLane([60, -65], [0, -65], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center3 = [0, -40]
+        net.add_lane("f", "g", CircularLane(center3, 20, np.deg2rad(-90), np.deg2rad(-180), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("f", "g", CircularLane(center3, 25, np.deg2rad(-90), np.deg2rad(-180), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        net.add_lane("g", "h", StraightLane([-20, -40], [-20, -20], line_types=(LineType.CONTINUOUS, LineType.NONE), width=5, speed_limit=sl))
+        net.add_lane("g", "h", StraightLane([-25, -40], [-25, -20], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center4 = [0, -20]
+        net.add_lane("h", "a", CircularLane(center4, 20, np.deg2rad(-180), np.deg2rad(-270), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("h", "a", CircularLane(center4, 25, np.deg2rad(-180), np.deg2rad(-270), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        self.segment_sequence = ["a", "b", "c", "d", "e", "f", "g", "h"]
+        self.spawn_options = [
+            ("a", "b", 0), ("a", "b", 1),
+            ("e", "f", 0), ("e", "f", 1),
+        ]
+        self.road = Road(network=net, np_random=self.np_random, record_history=self.config["show_trajectories"])
+
+    def _make_road_chicane(self) -> None:
+        """Oval with a left-right S kink in the bottom straight — besides
+        "fast" this is the only track with BOTH turn directions, and its
+        kink (10/15 m radii) is the tightest geometry in the pool."""
+        net = RoadNetwork()
+        sl = 16
+
+        net.add_lane("a", "b", StraightLane([0, 0], [80, 0], line_types=(LineType.CONTINUOUS, LineType.STRIPED), width=5, speed_limit=sl))
+        net.add_lane("a", "b", StraightLane([0, 5], [80, 5], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center1 = [80, -25]
+        net.add_lane("b", "c", CircularLane(center1, 25, np.deg2rad(90), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("b", "c", CircularLane(center1, 30, np.deg2rad(90), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        net.add_lane("c", "d", StraightLane([80, -50], [55, -50], line_types=(LineType.CONTINUOUS, LineType.NONE), width=5, speed_limit=sl))
+        net.add_lane("c", "d", StraightLane([80, -55], [55, -55], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        # Left half of the S: clockwise arc, so lane 0 is the OUTER radius
+        # (+lateral points radially inward on clockwise lanes)
+        center2 = [55, -65]
+        net.add_lane("d", "e", CircularLane(center2, 15, np.deg2rad(90), np.deg2rad(180), width=5, clockwise=True, line_types=(LineType.CONTINUOUS, LineType.STRIPED), speed_limit=sl))
+        net.add_lane("d", "e", CircularLane(center2, 10, np.deg2rad(90), np.deg2rad(180), width=5, clockwise=True, line_types=(LineType.NONE, LineType.CONTINUOUS), speed_limit=sl))
+
+        # Right half of the S
+        center3 = [25, -65]
+        net.add_lane("e", "f", CircularLane(center3, 15, np.deg2rad(0), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("e", "f", CircularLane(center3, 20, np.deg2rad(0), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        net.add_lane("f", "g", StraightLane([25, -80], [0, -80], line_types=(LineType.CONTINUOUS, LineType.NONE), width=5, speed_limit=sl))
+        net.add_lane("f", "g", StraightLane([25, -85], [0, -85], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center4 = [0, -40]
+        net.add_lane("g", "a", CircularLane(center4, 40, np.deg2rad(-90), np.deg2rad(-270), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("g", "a", CircularLane(center4, 45, np.deg2rad(-90), np.deg2rad(-270), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        self.segment_sequence = ["a", "b", "c", "d", "e", "f", "g"]
+        self.spawn_options = [
+            ("a", "b", 0), ("a", "b", 1),
+            ("f", "g", 0),
         ]
         self.road = Road(network=net, np_random=self.np_random, record_history=self.config["show_trajectories"])
 
