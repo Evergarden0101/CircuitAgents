@@ -88,7 +88,14 @@ class RacetrackFast(AbstractEnv):
             "collision_reward": -5.0,
             "lane_centering_reward":  1.0,   # weight on 1/(1+cost×lat²)
             "lane_centering_cost": 6.0,
-            "action_penalty": 0.05,
+            # Throttle-command magnitude penalty — DISABLED by default:
+            # its forward part taxes acceleration (counterproductive when
+            # speed is the objective) and its doubled reverse part just
+            # duplicates reverse_penalty while also taxing the reverse
+            # command during wall escapes (it is not escape-zone waived).
+            # Steering smoothness is handled by steering_penalty +
+            # steering_jerk_penalty, not by this term.
+            "action_penalty": 0.0,
             "speed_reward": 1.0,
             # Kept small: taxing steering too hard makes "hold throttle and
             # let the wall steer the car" score better than learning to corner
@@ -627,7 +634,7 @@ class RacetrackFast(AbstractEnv):
             lane_centering   # [0, 1]        stay on road, stay centered
             + speed_reward   # [-1, +1]      go forward, don't reverse
             + forward_vel_reward  # [-0.4, +0.8]  (proj capped by |ego_min|=8 in reverse)
-            + action_penalty # [-0.1, 0]     don't over-throttle backward
+            + action_penalty # 0 by default (redundant with reverse_penalty)
             + steering_cost  # [-0.1, 0]     smooth steering
             + jerk_penalty   # [-0.4, 0]     no steering direction flips
             + reverse_penalty# [-0.8, 0]     discrete reverse hit
