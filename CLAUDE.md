@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 RL racetrack agents built on highway-env, deployed into a C# game engine (RE Engine) via ONNX. Two generations coexist:
 
-- **Active stack** (`racetrack-agents/race_env.py` + `racetrack-agents/task2_laning_overtaking_sb3_ppo.ipynb` + `racetrack-agents/re_engine/`): gymnasium + `highway-env>=1.8` + Stable-Baselines3 PPO. This is where all current work happens.
+- **Active stack** (`racetrack-agents/race_env.py` + the task2/task3 notebooks + `racetrack-agents/re_engine/`): gymnasium + `highway-env>=1.8` + Stable-Baselines3 PPO. This is where all current work happens. Two training notebooks share the same pipeline: `task2_laning_overtaking_sb3_ppo.ipynb` (fast track only) and `task3_generalization_sb3_ppo.ipynb` (random track per episode + per-track Generalization Report) — behavioural changes usually belong in BOTH.
 - **Legacy stack** (`racetrack-agents/main.py`, `racetrack_env.py`, `agent/`, `models/`, and the root-level `*.ipynb` / `AIDrive*.cs`): TensorFlow 2.6 / gym 0.21 / highway-env 1.4. `racetrack-agents/requirements.txt` pins THIS legacy stack, not the active one. Don't modernize it; don't take API conventions from it.
 
 ## Commands
@@ -15,10 +15,10 @@ RL racetrack agents built on highway-env, deployed into a C# game engine (RE Eng
 # Active-stack dependencies (requirements.txt is legacy — do not use it)
 pip install "highway-env>=1.8" "stable-baselines3[extra]>=2.0" gymnasium torch tensorboard moviepy onnx onnxruntime
 
-# Training: run the notebook. FAST_DEV_RUN (a variable in the config cell) toggles
-# a minutes-long pipeline smoke test vs the real run. Fast-dev output drives badly
-# BY DESIGN (73k steps, ent 0.10) — steering emerges at ~50k–100k steps only with
-# the production hyperparameters (ent 0.02, lr 2e-4).
+# Training: run a notebook (task2 = fast track, task3 = multi-track generalization).
+# FAST_DEV_RUN (a variable in the config cell) toggles a shortened run vs the real
+# one; it now uses 120k+ steps at production hyperparameters, the smallest budget
+# that reliably shows LAPS (lap competence emerges at ~50k–100k steps, measured).
 
 # C# observation-port verification (the closest thing to a test suite):
 cd racetrack-agents/re_engine/verify && dotnet run -- ..
@@ -49,7 +49,7 @@ Registered by the notebook as `racetrack-v0`. Continuous throttle+steering contr
 - **Wall-escape economics**: within `wall_escape_zone` (1.0 m clearance) reverse/idle penalties are waived and clearance gained is rewarded (`wall_escape_progress`). This exists because penalizing reverse one step after it pulls the car off the wall teaches wall-creeping instead of escaping. Don't re-tighten it to contact-only.
 - Speed rewards are zeroed at wall contact (anti wall-riding); `action_penalty` defaults to 0 (redundant with `reverse_penalty`, and it taxed escape commands).
 
-### Training pipeline (the task2 notebook)
+### Training pipeline (task2/task3 notebooks)
 
 Two-phase PPO curriculum: phase 1 trains lane-following with `other_vehicles=0`, phase 2 fine-tunes with NPCs via `PPO.load(..., custom_objects=...)`. Custom `RacetrackCNN` features extractor; the throttle action bias is manually shifted forward after model construction. Best models land in `runs/<EXP_ID>/models/best/phase1|phase2/best_model.zip` (per-phase — there is no top-level `best_model.zip`). PPO can regress late in training; trust `EvalCallback` best models over the last checkpoint. Exports three ONNX files: actor-only (CHW), full policy (CHW), and **actor-only NHWC** — see below.
 
