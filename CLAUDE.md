@@ -66,5 +66,5 @@ A faithful C# port of the OccupancyGrid observation builder, verified bit-identi
 
 ### Empirical baselines (measured in-session, default config, production hyperparameters)
 
-- Steering competence emerges between 50k–100k steps; by 250k: ~37 laps/episode at 16 m/s on the fast track, and the fast-track-only policy zero-shot transfers to the oval.
+- Steering competence emerges between 30k–60k steps with the current reward (32 laps at 14.4 m/s by 60k; 37 laps at 16 m/s by 90k). The fast-dev recipe (120k, ent 0.02, lr 2e-4, batch 256, bias +0.40) was validated END-TO-END including the 16k phase-2 fine-tune at lr 3e-4 — no regression. Fast-track-only policies zero-shot transfer to all four simpler tracks at the speed limit.
 - `acceleration_range ±2.5` + `steering π/8` is learnable (~22 laps at ~10 m/s by 100k) but caps cruise speed: braking distance at 2.5 m/s² from top speed (51 m) exceeds the 27 m grid preview. Prefer asymmetric `[-5.0, 2.5]` if limiting engine power.
