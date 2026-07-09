@@ -2,9 +2,23 @@
 // HighwayObservationBuilder.cs  —  SINGLE-FILE observation builder for the
 // RacetrackFast PPO ONNX model (highway-env 1.11 OccupancyGridObservation).
 //
-// Self-contained: the track lane geometry (from race_env._make_road) is
-// embedded, so lat_off / ang_off / on_road are fully implemented — no
-// spline system, no other files, no engine dependencies.
+// Self-contained: no spline system, no other files, no engine dependencies.
+// The LANES ARE SUPPLIED BY THE CALLER — build them with Lane.Straight
+// (two points) / Lane.Arc (center, radius, phases, direction) and pass the
+// list to the constructor:
+//
+//   var lanes = new List<HighwayObservationBuilder.Lane> {
+//       HighwayObservationBuilder.Lane.Straight(42, 0, 100, 0),
+//       HighwayObservationBuilder.Lane.Arc(100, -20, 20,
+//           Math.PI / 2, -0.0175, clockwise: false),   // phases in RADIANS
+//       ...
+//   };
+//   var builder = new HighwayObservationBuilder(lanes);
+//
+// The geometry MUST replicate race_env._make_road() exactly (same lanes,
+// same order not required, but same centerlines) or lat_off/ang_off/on_road
+// diverge from what the model saw in training.
+// RacetrackFastLanes() returns the built-in copy of the current track.
 //
 // Output: float[1440] = float32 tensor [1, 12, 12, 10] CHANNELS-LAST (HWC),
 //         flat index = (cellX*12 + cellY)*10 + feature. Feed directly to a
@@ -89,6 +103,20 @@ namespace RacetrackSingle
         }
 
         // ============================================================
+        // Construction — lanes come from the caller
+        // ============================================================
+
+        private readonly Lane[] _lanes;
+
+        public HighwayObservationBuilder(IList<Lane> lanes)
+        {
+            if (lanes == null || lanes.Count == 0)
+                throw new ArgumentException("at least one lane is required");
+            _lanes = new Lane[lanes.Count];
+            for (int i = 0; i < lanes.Count; i++) _lanes[i] = lanes[i];
+        }
+
+        // ============================================================
         // Public entry
         // ============================================================
 
@@ -112,9 +140,9 @@ namespace RacetrackSingle
             //--------------------------------------------
             // on_road layer: lane-centerline waypoint trace
             //--------------------------------------------
-            for (int l = 0; l < Lanes.Length; l++)
+            for (int l = 0; l < _lanes.Length; l++)
             {
-                Lane lane = Lanes[l];
+                Lane lane = _lanes[l];
                 double s0, latUnused;
                 lane.Local(ego.Position.X, ego.Position.Y, out s0, out latUnused);
                 for (double s = s0 - LanePerception; s < s0 + LanePerception; s += WaypointSpacing)
@@ -185,12 +213,12 @@ namespace RacetrackSingle
             double bestScore = double.PositiveInfinity;
             double bestS = 0, bestLat = 0;
 
-            for (int i = 0; i < Lanes.Length; i++)
+            for (int i = 0; i < _lanes.Length; i++)
             {
                 double s, lat;
-                Lanes[i].Local(px, py, out s, out lat);
-                double overrun = Math.Max(s - Lanes[i].Length, 0.0) + Math.Max(-s, 0.0);
-                double angle = Math.Abs(WrapToPi(heading - Lanes[i].HeadingAt(s)));
+                _lanes[i].Local(px, py, out s, out lat);
+                double overrun = Math.Max(s - _lanes[i].Length, 0.0) + Math.Max(-s, 0.0);
+                double angle = Math.Abs(WrapToPi(heading - _lanes[i].HeadingAt(s)));
                 double score = Math.Abs(lat) + overrun + angle;
                 if (score < bestScore)
                 {
@@ -199,7 +227,7 @@ namespace RacetrackSingle
             }
 
             latOff = bestLat;
-            angOff = WrapToPi(heading - Lanes[best].HeadingAt(bestS));
+            angOff = WrapToPi(heading - _lanes[best].HeadingAt(bestS));
         }
 
         // ============================================================
@@ -250,12 +278,16 @@ namespace RacetrackSingle
         }
 
         // ============================================================
-        // Track geometry — copy of race_env._make_road() (18 lanes).
-        // Straights: start/end points. Arcs: center, radius, phases,
-        // clockwise flag (highway-env direction = cw ? 1 : -1).
+        // Lane geometry — construct these OUTSIDE and pass them to the
+        // builder's constructor. Two shapes, mirroring highway-env:
+        //   Lane.Straight(x1, y1, x2, y2)          — centerline endpoints
+        //   Lane.Arc(cx, cy, radius, p0, p1, cw)   — phases in RADIANS
+        //   Lane.ArcDegrees(...)                   — same, phases in degrees
+        // clockwise maps to highway-env direction = cw ? 1 : -1; length is
+        // derived (straight: point distance, arc: radius * swept angle).
         // ============================================================
 
-        sealed class Lane
+        public sealed class Lane
         {
             bool _arc;
             // straight
@@ -264,12 +296,16 @@ namespace RacetrackSingle
             double _cx, _cy, _r, _phase0;
             int _dir;
 
-            public double Length;
+            public double Length { get; private set; }
+
+            Lane() { }
 
             public static Lane Straight(double x1, double y1, double x2, double y2)
             {
-                Lane l = new Lane { _arc = false, _sx = x1, _sy = y1 };
                 double len = Math.Sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
+                if (len <= 0.0)
+                    throw new ArgumentException("straight lane needs two distinct points");
+                Lane l = new Lane { _arc = false, _sx = x1, _sy = y1 };
                 l.Length = len;
                 l._dirX = (x2 - x1) / len; l._dirY = (y2 - y1) / len;
                 l._latX = -l._dirY; l._latY = l._dirX;
@@ -277,16 +313,30 @@ namespace RacetrackSingle
                 return l;
             }
 
-            public static Lane Arc(double cx, double cy, double r,
-                                   double phase0Deg, double phase1Deg, bool clockwise)
+            // phases in RADIANS (highway-env / track.json convention)
+            public static Lane Arc(double cx, double cy, double radius,
+                                   double startPhase, double endPhase, bool clockwise)
             {
-                Lane l = new Lane { _arc = true, _cx = cx, _cy = cy, _r = r };
+                if (radius <= 0.0)
+                    throw new ArgumentException("arc lane needs a positive radius");
+                Lane l = new Lane { _arc = true, _cx = cx, _cy = cy, _r = radius };
                 l._dir = clockwise ? 1 : -1;
-                double p0 = phase0Deg * Math.PI / 180.0;
-                double p1 = phase1Deg * Math.PI / 180.0;
-                l._phase0 = p0;
-                l.Length = r * (p1 - p0) * l._dir;
+                l._phase0 = startPhase;
+                l.Length = radius * (endPhase - startPhase) * l._dir;
+                if (l.Length <= 0.0)
+                    throw new ArgumentException(
+                        "arc phases sweep against the clockwise flag (negative length)");
                 return l;
+            }
+
+            // phases in degrees (convenience; race_env authors arcs in degrees)
+            public static Lane ArcDegrees(double cx, double cy, double radius,
+                                          double startPhaseDeg, double endPhaseDeg,
+                                          bool clockwise)
+            {
+                return Arc(cx, cy, radius,
+                           startPhaseDeg * Math.PI / 180.0,
+                           endPhaseDeg * Math.PI / 180.0, clockwise);
             }
 
             public void Local(double px, double py, out double s, out double lat)
@@ -331,35 +381,45 @@ namespace RacetrackSingle
             }
         }
 
-        static readonly Lane[] Lanes = new Lane[]
+        // ============================================================
+        // Built-in preset — copy of race_env._make_road() (18 lanes).
+        // Use it as-is, or as the template for authoring your own list:
+        //   new HighwayObservationBuilder(
+        //       HighwayObservationBuilder.RacetrackFastLanes())
+        // ============================================================
+
+        public static Lane[] RacetrackFastLanes()
         {
-            // a -> b
-            Lane.Straight(42, 0, 100, 0),
-            Lane.Straight(42, 5, 100, 5),
-            // b -> c
-            Lane.Arc(100, -20, 20, 90, -1, false),
-            Lane.Arc(100, -20, 25, 90, -1, false),
-            // c -> d
-            Lane.Straight(120, -19, 120, -30),
-            Lane.Straight(125, -19, 125, -30),
-            // d -> e
-            Lane.Arc(105, -30, 15, 0, -181, false),
-            Lane.Arc(105, -30, 20, 0, -181, false),
-            // e -> f  (lane 0 is the OUTER radius on this segment)
-            Lane.Arc(70, -30, 20, 0, 136, true),
-            Lane.Arc(70, -30, 15, 0, 137, true),
-            // f -> g
-            Lane.Straight(55.7, -15.7, 35.7, -35.7),
-            Lane.Straight(59.23553, -19.23553, 39.23553, -39.23553),
-            // g -> h
-            Lane.Arc(18.1, -18.1, 25, 315, 170, false),
-            Lane.Arc(18.1, -18.1, 30, 315, 165, false),
-            // h -> i
-            Lane.Arc(18.1, -18.1, 25, 170, 56, false),
-            Lane.Arc(18.1, -18.1, 30, 170, 58, false),
-            // i -> a  (lane 0 is the OUTER radius on this segment)
-            Lane.Arc(43.2, 23.4, 23.5, 240, 270, true),
-            Lane.Arc(43.2, 23.4, 18.5, 238, 268, true),
-        };
+            return new Lane[]
+            {
+                // a -> b
+                Lane.Straight(42, 0, 100, 0),
+                Lane.Straight(42, 5, 100, 5),
+                // b -> c
+                Lane.ArcDegrees(100, -20, 20, 90, -1, false),
+                Lane.ArcDegrees(100, -20, 25, 90, -1, false),
+                // c -> d
+                Lane.Straight(120, -19, 120, -30),
+                Lane.Straight(125, -19, 125, -30),
+                // d -> e
+                Lane.ArcDegrees(105, -30, 15, 0, -181, false),
+                Lane.ArcDegrees(105, -30, 20, 0, -181, false),
+                // e -> f  (lane 0 is the OUTER radius on this segment)
+                Lane.ArcDegrees(70, -30, 20, 0, 136, true),
+                Lane.ArcDegrees(70, -30, 15, 0, 137, true),
+                // f -> g
+                Lane.Straight(55.7, -15.7, 35.7, -35.7),
+                Lane.Straight(59.23553, -19.23553, 39.23553, -39.23553),
+                // g -> h
+                Lane.ArcDegrees(18.1, -18.1, 25, 315, 170, false),
+                Lane.ArcDegrees(18.1, -18.1, 30, 315, 165, false),
+                // h -> i
+                Lane.ArcDegrees(18.1, -18.1, 25, 170, 56, false),
+                Lane.ArcDegrees(18.1, -18.1, 30, 170, 58, false),
+                // i -> a  (lane 0 is the OUTER radius on this segment)
+                Lane.ArcDegrees(43.2, 23.4, 23.5, 240, 270, true),
+                Lane.ArcDegrees(43.2, 23.4, 18.5, 238, 268, true),
+            };
+        }
     }
 }

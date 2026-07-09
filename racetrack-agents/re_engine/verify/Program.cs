@@ -84,23 +84,43 @@ static class Program
             }
         }
         // ---- single-file builder (HighwayObservationBuilder.cs) ----
-        Console.WriteLine("--- single-file HighwayObservationBuilder ---");
-        var single = new RacetrackSingle.HighwayObservationBuilder();
-        foreach (var sc in reference.scenarios)
-        {
-            var npcs = new List<RacetrackSingle.HighwayObservationBuilder.Vehicle>();
-            foreach (var n in sc.npcs) npcs.Add(ToSingle(n));
-            float[] obs = single.BuildObservation(ToSingle(sc.ego), npcs);   // HWC
+        // Lanes are now constructed OUTSIDE the builder: once from the
+        // built-in preset, once from track.json via the Lane factories
+        // (points for straights; center/radius/phases[rad] for arcs).
+        var jsonLanes = new List<RacetrackSingle.HighwayObservationBuilder.Lane>();
+        foreach (var ld in trackData.lanes)
+            jsonLanes.Add(ld.type == "straight"
+                ? RacetrackSingle.HighwayObservationBuilder.Lane.Straight(
+                      ld.start[0], ld.start[1], ld.end[0], ld.end[1])
+                : RacetrackSingle.HighwayObservationBuilder.Lane.Arc(
+                      ld.center[0], ld.center[1], ld.radius,
+                      ld.start_phase, ld.end_phase, ld.clockwise));
 
-            double maxDiff = 0;
-            for (int f = 0; f < 10; f++)
-                for (int ix = 0; ix < 12; ix++)
-                    for (int iy = 0; iy < 12; iy++)
-                        maxDiff = Math.Max(maxDiff, Math.Abs(
-                            obs[(ix * 12 + iy) * 10 + f] - sc.obs[(f * 12 + ix) * 12 + iy]));
-            bool pass = maxDiff <= 1e-5;
-            allPass &= pass;
-            Console.WriteLine($"  {(pass ? "PASS" : "FAIL")}  {sc.name,-28} maxDiff={maxDiff:E2}");
+        var singles = new (string label, RacetrackSingle.HighwayObservationBuilder builder)[]
+        {
+            ("preset lanes", new RacetrackSingle.HighwayObservationBuilder(
+                RacetrackSingle.HighwayObservationBuilder.RacetrackFastLanes())),
+            ("json lanes  ", new RacetrackSingle.HighwayObservationBuilder(jsonLanes)),
+        };
+        foreach (var (label, single) in singles)
+        {
+            Console.WriteLine($"--- single-file HighwayObservationBuilder ({label}) ---");
+            foreach (var sc in reference.scenarios)
+            {
+                var npcs = new List<RacetrackSingle.HighwayObservationBuilder.Vehicle>();
+                foreach (var n in sc.npcs) npcs.Add(ToSingle(n));
+                float[] obs = single.BuildObservation(ToSingle(sc.ego), npcs);   // HWC
+
+                double maxDiff = 0;
+                for (int f = 0; f < 10; f++)
+                    for (int ix = 0; ix < 12; ix++)
+                        for (int iy = 0; iy < 12; iy++)
+                            maxDiff = Math.Max(maxDiff, Math.Abs(
+                                obs[(ix * 12 + iy) * 10 + f] - sc.obs[(f * 12 + ix) * 12 + iy]));
+                bool pass = maxDiff <= 1e-5;
+                allPass &= pass;
+                Console.WriteLine($"  {(pass ? "PASS" : "FAIL")}  {sc.name,-28} maxDiff={maxDiff:E2}");
+            }
         }
 
         Console.WriteLine(allPass ? "ALL SCENARIOS MATCH" : "MISMATCH DETECTED");

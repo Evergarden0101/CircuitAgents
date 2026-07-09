@@ -11,7 +11,7 @@ output is **bit-identical** to the Python environment.
 | File | What it is |
 |---|---|
 | `RacetrackObservation.cs` | The full game-side script. Engine-agnostic C# (only `System.*`): lane math, track (hardcoded + JSON loader), observation builder, 5 Hz update driver, CHW reorder, `Frame2D`, action decoder. |
-| `HighwayObservationBuilder.cs` | **Single-file alternative**: one class, `Vector3`-based `Vehicle` inputs, track geometry embedded, lat_off/ang_off/on_road fully implemented. No JSON, no other files. Pick this OR `RacetrackObservation.cs`, not both. Its header lists the 8 contract rules that naive implementations get wrong. |
+| `HighwayObservationBuilder.cs` | **Single-file alternative**: one class, `Vector3`-based `Vehicle` inputs, lat_off/ang_off/on_road fully implemented. Lanes are constructed by the caller (`Lane.Straight(x1,y1,x2,y2)`, `Lane.Arc(cx,cy,radius,phase0,phase1,clockwise)` in radians, `Lane.ArcDegrees(...)`) and passed to the constructor; `RacetrackFastLanes()` returns the built-in copy of the training track. Pick this OR `RacetrackObservation.cs`, not both. Its header lists the contract rules that naive implementations get wrong. |
 | `track.json` | The 18 lane centerlines of the current track, exported from the live Python env. Load with your engine's JSON parser into `TrackData` → `Track.FromData(...)`. |
 | `reference_obs.json` | Ground-truth observations dumped from the real highway-env for 4 test scenarios. Unit-test data for the C# port. |
 | `export_track_json.py` | Regenerates the two JSONs from `race_env.py`. **Re-run after any change to the track or observation config.** |
