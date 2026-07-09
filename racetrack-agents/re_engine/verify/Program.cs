@@ -123,6 +123,57 @@ static class Program
             }
         }
 
+        // ---- track preset parity: C# preset lanes vs python-exported JSON ----
+        // Guards against typos in the hardcoded presets: every lane's
+        // centerline is sampled along its length and compared to the lane
+        // built from track_<name>.json (exported by export_track_json.py).
+        Console.WriteLine("--- track preset geometry parity ---");
+        var presets = new (string name, RacetrackSingle.HighwayObservationBuilder.Lane[] lanes)[]
+        {
+            ("fast",    RacetrackSingle.HighwayObservationBuilder.RacetrackFastLanes()),
+            ("oval",    RacetrackSingle.HighwayObservationBuilder.OvalLanes()),
+            ("stadium", RacetrackSingle.HighwayObservationBuilder.StadiumLanes()),
+            ("rect",    RacetrackSingle.HighwayObservationBuilder.RectLanes()),
+            ("chicane", RacetrackSingle.HighwayObservationBuilder.ChicaneLanes()),
+        };
+        foreach (var (name, preset) in presets)
+        {
+            string path = Path.Combine(dir, $"track_{name}.json");
+            if (!File.Exists(path))
+            {
+                Console.WriteLine($"  SKIP  {name,-8} ({path} missing — run export_track_json.py)");
+                continue;
+            }
+            var td = JsonSerializer.Deserialize<TrackData>(File.ReadAllText(path), opts);
+            bool pass = td.lanes.Length == preset.Length;
+            double worst = 0;
+            if (pass)
+            {
+                for (int i = 0; i < preset.Length; i++)
+                {
+                    var ld = td.lanes[i];
+                    var refLane = ld.type == "straight"
+                        ? RacetrackSingle.HighwayObservationBuilder.Lane.Straight(
+                              ld.start[0], ld.start[1], ld.end[0], ld.end[1])
+                        : RacetrackSingle.HighwayObservationBuilder.Lane.Arc(
+                              ld.center[0], ld.center[1], ld.radius,
+                              ld.start_phase, ld.end_phase, ld.clockwise);
+                    for (int k = 0; k <= 4; k++)
+                    {
+                        double s = refLane.Length * k / 4.0;
+                        refLane.Point(s, out double rx, out double ry);
+                        preset[i].Point(s, out double px, out double py);
+                        double d = Math.Sqrt((rx - px) * (rx - px) + (ry - py) * (ry - py));
+                        worst = Math.Max(worst, d);
+                        worst = Math.Max(worst, Math.Abs(refLane.Length - preset[i].Length));
+                    }
+                }
+                pass = worst <= 1e-4;
+            }
+            allPass &= pass;
+            Console.WriteLine($"  {(pass ? "PASS" : "FAIL")}  {name,-8} lanes={preset.Length} maxDiff={worst:E2}");
+        }
+
         Console.WriteLine(allPass ? "ALL SCENARIOS MATCH" : "MISMATCH DETECTED");
         return allPass ? 0 : 1;
     }

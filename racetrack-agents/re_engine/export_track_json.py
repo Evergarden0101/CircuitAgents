@@ -97,7 +97,21 @@ def make_scenario(env, name, ego_spec, npc_specs) -> dict:
     }
 
 
+TRACKS = ("fast", "oval", "stadium", "rect", "chicane")
+
+
 def main():
+    # Per-track lane geometry for the C# side: track.json stays the "fast"
+    # track (backward compatible), track_<name>.json covers every variant.
+    for name in TRACKS:
+        tenv = RacetrackFast(config={"other_vehicles": 0, "duration": 10_000,
+                                     "track": name})
+        tenv.reset(seed=0)
+        tdata = export_track(tenv)
+        (OUT_DIR / f"track_{name}.json").write_text(
+            json.dumps(tdata, indent=1), encoding="utf-8")
+        print(f"track_{name}.json: {len(tdata['lanes'])} lanes")
+
     env = RacetrackFast(config={"other_vehicles": 0, "duration": 10_000})
     env.reset(seed=0)
 
