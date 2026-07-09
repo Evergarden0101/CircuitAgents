@@ -94,8 +94,10 @@ class RacetrackFast(AbstractEnv):
             "idle_penalty":     0.80,        # hit for abs(speed) < 0.5 m/s
             "idle_grace_steps":       15,   # first 15 policy steps (3 seconds) are exempt
 
-            "checkpoint_bonus":       0.25,   # bonus per segment crossing (9 segments total)
-            "lap_bonus":              0.50,   # bonus for completing a full lap
+            # Paid in RAW reward units (same scale as the weights above),
+            # added BEFORE the lmap to [0, 1]
+            "checkpoint_bonus":       1.0,    # bonus per segment crossing (9 segments total)
+            "lap_bonus":              2.0,    # bonus for completing a full lap
             "forward_velocity_reward": 0.8,
             # Misc
             "show_trajectories": False,
@@ -517,9 +519,11 @@ class RacetrackFast(AbstractEnv):
                 # Positive reward: proportional to reverse speed
                 escape_ratio       = abs(speed) / max(1.0, abs(ego_min))
                 wall_escape_reward = self.config.get("wall_escape_reward", 0.6) * escape_ratio
-            elif throttle < -0.2:
+            elif throttle < -0.2 and speed < 1.0:
                 # Policy commands reverse but speed not negative yet
-                # (car just started reversing this step)
+                # (car just started reversing this step). The speed guard
+                # stops wall-grinding at speed from dodging the ride penalty
+                # by merely HOLDING reverse throttle while momentum carries it
                 wall_escape_reward = self.config.get("wall_escape_reward", 0.6) * 0.3
             else:
                 # At wall, not reversing → penalty; grows with speed so
@@ -534,14 +538,14 @@ class RacetrackFast(AbstractEnv):
         # ──  Compose base reward ─────────────────────────────────────
         reward = (
             lane_centering   # [0, 1]        stay on road, stay centered
-            + speed_reward   # [-0.6, +0.6]  go forward, don't reverse
-            + forward_vel_reward
-            + action_penalty # [-0.3, 0]     don't over-throttle backward
-            + steering_cost  # [-0.15, 0]    smooth steering
-            + jerk_penalty  
+            + speed_reward   # [-1, +1]      go forward, don't reverse
+            + forward_vel_reward  # [-0.4, +0.8]  (proj capped by |ego_min|=8 in reverse)
+            + action_penalty # [-0.1, 0]     don't over-throttle backward
+            + steering_cost  # [-0.1, 0]     smooth steering
+            + jerk_penalty   # [-0.4, 0]     no steering direction flips
             + reverse_penalty# [-0.8, 0]     discrete reverse hit
-            + idle_penalty   # [-0.4, 0]     discrete idle hit
-            + wall_escape_reward
+            + idle_penalty   # [-0.8, 0]     discrete idle hit (exclusive with reverse)
+            + wall_escape_reward  # [-1.0, +0.4]
         )
 
         # ── Crash penalty — overrides everything including offroad ───
@@ -561,15 +565,23 @@ class RacetrackFast(AbstractEnv):
             # contact, which only means clearance ≈ 0) → terminate signal
             reward = self.config.get("collision_reward", -5.0)
 
-        # ── Map to [0, 1] ────────────────────────────────────────────
-        # clip_range covers normal operation: base reward ∈ [-3, 3]
-        # collision_reward=-5.0 gets clipped to 0.0 (minimum)
-        reward = float(utils.lmap(reward, [-3.0, 3.0], [0.0, 1.0]))
-
         # Fires once per new segment entered in the correct lap direction.
-        # Pays in [0,1] space directly so it is always meaningful regardless of base reward.
-        reward = float(np.clip(reward + self._checkpoint_bonus(), 0.0, 1.0))
-        return reward
+        # Paid in RAW reward units so the config values are comparable to the
+        # other weights. (Previously added after the lmap, in [0,1] space,
+        # which silently made each unit of bonus worth 6 raw units.)
+        reward += self._checkpoint_bonus()
+
+        # ── Map to [0, 1] ────────────────────────────────────────────
+        # Range must cover the true bounds of the composed reward, otherwise
+        # distinct bad states saturate to 0 after the final clip and lose
+        # their gradient. With the current weights: worst ordinary step
+        # ≈ -2.8 (full reverse + jerk + reverse penalty, off-center), best
+        # ≈ +2.8 — re-derive these bounds whenever a weight changes.
+        # collision_reward=-5.0 maps below 0 and clips to 0.0; checkpoint/
+        # lap steps may exceed +3 and clip to 1.0 — intentional, the
+        # milestone step is allowed to saturate.
+        reward = float(utils.lmap(reward, [-3.0, 3.0], [0.0, 1.0]))
+        return float(np.clip(reward, 0.0, 1.0))
     
     def _is_terminated(self) -> bool:
         if self.vehicle.crashed:
