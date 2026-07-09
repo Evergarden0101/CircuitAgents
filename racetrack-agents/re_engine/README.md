@@ -15,6 +15,7 @@ output is **bit-identical** to the Python environment.
 | `track.json` | The 18 lane centerlines of the current track, exported from the live Python env. Load with your engine's JSON parser into `TrackData` → `Track.FromData(...)`. |
 | `reference_obs.json` | Ground-truth observations dumped from the real highway-env for 4 test scenarios. Unit-test data for the C# port. |
 | `export_track_json.py` | Regenerates the two JSONs from `race_env.py`. **Re-run after any change to the track or observation config.** |
+| `convert_onnx_nhwc.py` | Rewrites a channels-first actor export (`[1,10,12,12]`) into the engine layout (`[1,12,12,10]` NHWC) by prepending a Transpose. Verifies output equivalence. |
 | `verify/` | .NET console harness (`dotnet run -- ..`) that rebuilds every reference scenario with the C# code and diffs it against Python. Currently: max diff 0.0 on all scenarios. |
 
 ## Quick start (game side)
@@ -47,7 +48,12 @@ ApplyAction(accel, steer);                         // hold action between ticks
   accumulates `deltaTime` and fires every 0.2 s; hold the last action on all
   other ticks.
 - `ObsHWC` is the model input layout `[H=12, W=12, C=10]` (channels-last
-  sequence, flat index `(ix*12 + iy)*10 + f`).
+  sequence, flat index `(ix*12 + iy)*10 + f`). Deploy it with
+  **`ppo_actor_only_nhwc.onnx`** (exported by the notebook, or produced
+  from any channels-first actor export via `convert_onnx_nhwc.py`).
+  Feeding the HWC sequence into the channels-first export scrambles every
+  channel — the policy degenerates to near-constant outputs (throttle
+  ~0.4, steering ~0.2) and cannot corner.
 - `ObsCHW` is the same data reordered to `[1, 10, 12, 12]` (channels-first)
   — the layout of the notebook's raw `torch.onnx` export. Feeding one
   layout into the other's input scrambles every channel, so pick the one

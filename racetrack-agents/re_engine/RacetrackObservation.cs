@@ -17,8 +17,12 @@
 //   iy = lateral cell      (grid y: -18 m .. +18 m,       3 m cells) = W
 //   f  = feature/channel                                             = C
 //   ego sits at cell (3, 6)
-// NOTE: the notebook's torch.onnx export is channels-FIRST [1, 10, 12, 12];
-// this builder emits the HWC sequence the engine-side model input expects.
+// Deploy ppo_actor_only_nhwc.onnx (input [1, 12, 12, 10]) with this builder —
+// exported by the notebook's NHWC cell, or converted from an existing
+// channels-first export with convert_onnx_nhwc.py. Feeding this HWC sequence
+// into the channels-FIRST export (ppo_actor_only.onnx, [1, 10, 12, 12])
+// scrambles every channel: the policy degenerates to near-constant outputs
+// (throttle ~0.4, steering ~0.2) and cannot corner.
 // HwcToChw() is provided for the channels-first path if ever needed.
 //
 // Features (channel order):
