@@ -50,32 +50,37 @@ static class Program
             {
                 var npcs = new VehicleState[sc.npcs.Length];
                 for (int i = 0; i < npcs.Length; i++) npcs[i] = ToState(sc.npcs[i]);
-                float[] obs = builder.Build(ToState(sc.ego), npcs);
+                float[] obs = builder.Build(ToState(sc.ego), npcs);   // HWC
 
+                // reference_obs.json is dumped CHW from python; the builder
+                // now emits HWC — compare via hwc[(ix*12+iy)*10+f] vs
+                // chw[(f*12+ix)*12+iy]
                 double maxDiff = 0;
-                int worst = -1;
-                for (int i = 0; i < obs.Length; i++)
-                {
-                    double d = Math.Abs(obs[i] - sc.obs[i]);
-                    if (d > maxDiff) { maxDiff = d; worst = i; }
-                }
+                int worst = -1;   // HWC index of the worst cell
+                for (int f = 0; f < 10; f++)
+                    for (int ix = 0; ix < 12; ix++)
+                        for (int iy = 0; iy < 12; iy++)
+                        {
+                            int iHwc = (ix * 12 + iy) * 10 + f;
+                            int iChw = (f * 12 + ix) * 12 + iy;
+                            double d = Math.Abs(obs[iHwc] - sc.obs[iChw]);
+                            if (d > maxDiff) { maxDiff = d; worst = iHwc; }
+                        }
                 bool pass = maxDiff <= 1e-5;
 
-                // HWC reorder round-trip: hwc[(ix*12+iy)*10+f] == chw[(f*12+ix)*12+iy]
-                float[] hwc = new float[obs.Length];
-                OccupancyGridBuilder.ChwToHwc(obs, hwc);
-                bool hwcOk = true;
-                for (int f = 0; f < 10 && hwcOk; f++)
-                    for (int ix = 0; ix < 12 && hwcOk; ix++)
-                        for (int iy = 0; iy < 12; iy++)
-                            if (hwc[(ix * 12 + iy) * 10 + f] != obs[(f * 12 + ix) * 12 + iy])
-                            { hwcOk = false; break; }
-                pass &= hwcOk;
+                // CHW reorder round-trip: converter output must equal the
+                // python CHW reference element-for-element
+                float[] chw = new float[obs.Length];
+                OccupancyGridBuilder.HwcToChw(obs, chw);
+                bool chwOk = pass;
+                for (int i = 0; i < chw.Length && chwOk; i++)
+                    if (Math.Abs(chw[i] - sc.obs[i]) > 1e-5) chwOk = false;
+                pass &= chwOk;
                 allPass &= pass;
                 string detail = pass ? "" :
-                    $"  worst idx {worst} (feature {worst / 144}, cell {(worst % 144) / 12},{worst % 12}): " +
-                    $"c#={obs[worst]:G9} py={sc.obs[worst]:G9}" + (hwcOk ? "" : "  [HWC reorder BROKEN]");
-                Console.WriteLine($"  {(pass ? "PASS" : "FAIL")}  {sc.name,-28} maxDiff={maxDiff:E2} hwc={(hwcOk ? "ok" : "BAD")}{detail}");
+                    $"  worst hwc idx {worst} (cell {worst / 120},{(worst / 10) % 12}, feature {worst % 10}): " +
+                    $"c#={obs[worst]:G9}" + (chwOk ? "" : "  [CHW reorder BROKEN]");
+                Console.WriteLine($"  {(pass ? "PASS" : "FAIL")}  {sc.name,-28} maxDiff={maxDiff:E2} chw={(chwOk ? "ok" : "BAD")}{detail}");
             }
         }
         // ---- single-file builder (HighwayObservationBuilder.cs) ----
@@ -85,11 +90,14 @@ static class Program
         {
             var npcs = new List<RacetrackSingle.HighwayObservationBuilder.Vehicle>();
             foreach (var n in sc.npcs) npcs.Add(ToSingle(n));
-            float[] obs = single.BuildObservation(ToSingle(sc.ego), npcs);
+            float[] obs = single.BuildObservation(ToSingle(sc.ego), npcs);   // HWC
 
             double maxDiff = 0;
-            for (int i = 0; i < obs.Length; i++)
-                maxDiff = Math.Max(maxDiff, Math.Abs(obs[i] - sc.obs[i]));
+            for (int f = 0; f < 10; f++)
+                for (int ix = 0; ix < 12; ix++)
+                    for (int iy = 0; iy < 12; iy++)
+                        maxDiff = Math.Max(maxDiff, Math.Abs(
+                            obs[(ix * 12 + iy) * 10 + f] - sc.obs[(f * 12 + ix) * 12 + iy]));
             bool pass = maxDiff <= 1e-5;
             allPass &= pass;
             Console.WriteLine($"  {(pass ? "PASS" : "FAIL")}  {sc.name,-28} maxDiff={maxDiff:E2}");

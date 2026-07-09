@@ -11,10 +11,15 @@
 // ---------------------------------------------------------------------------
 // OBSERVATION CONTRACT (must match training EXACTLY)
 // ---------------------------------------------------------------------------
-// Tensor: float32 [1, 10, 12, 12], CHW, flat index = f*144 + ix*12 + iy
-//   ix = longitudinal cell (grid x: -9 m .. +27 m ahead, 3 m cells)
-//   iy = lateral cell      (grid y: -18 m .. +18 m,       3 m cells)
+// Tensor: float32 [1, 12, 12, 10], HWC (channels-LAST) sequence,
+//   flat index = (ix*12 + iy)*10 + f
+//   ix = longitudinal cell (grid x: -9 m .. +27 m ahead, 3 m cells)  = H
+//   iy = lateral cell      (grid y: -18 m .. +18 m,       3 m cells) = W
+//   f  = feature/channel                                             = C
 //   ego sits at cell (3, 6)
+// NOTE: the notebook's torch.onnx export is channels-FIRST [1, 10, 12, 12];
+// this builder emits the HWC sequence the engine-side model input expects.
+// HwcToChw() is provided for the channels-first path if ever needed.
 //
 // Features (channel order):
 //   0 presence  1 at each vehicle's cell, else 0
@@ -67,7 +72,8 @@
 // ---------------------------------------------------------------------------
 // - Inference cadence: policy_frequency = 5 Hz. Run the model every 0.2 s of
 //   game time and HOLD the action in between.
-// - ONNX input  "obs":         [1, 10, 12, 12] float32  (this builder's output)
+// - Model input "obs":         [1, 12, 12, 10] float32 HWC (this builder's
+//                              output; use HwcToChw for a channels-first model)
 // - ONNX output "action_mean": [1, 2] float32, UNCLIPPED. Decode:
 //       a = clamp(action_mean, -1, 1)
 //       acceleration = a[0] * 5.0          //  acceleration_range [-5, 5] m/s^2
@@ -392,8 +398,8 @@ namespace RacetrackAgents
             return grid;
         }
 
-        // Allocation-free variant for per-frame use. Feed the result to ONNX
-        // as tensor [1, 10, 12, 12] (the flat array is already CHW).
+        // Allocation-free variant for per-frame use. The flat array is HWC
+        // (channels-last): feed it to a model input of shape [1, 12, 12, 10].
         public void BuildInto(float[] grid, VehicleState ego, IList<VehicleState> npcs)
         {
             if (grid.Length != TensorLength)
@@ -418,7 +424,7 @@ namespace RacetrackAgents
                     Vec2 wp = lane.PositionAt(sc, 0.0);
                     int ix, iy;
                     if (PosToIndex(wp.X - ego.X, wp.Y - ego.Y, cosH, sinH, out ix, out iy))
-                        grid[F_ON_ROAD * CellsX * CellsY + ix * CellsY + iy] = 1f;
+                        grid[(ix * CellsY + iy) * FeatureCount + F_ON_ROAD] = 1f;
                 }
             }
 
@@ -443,17 +449,17 @@ namespace RacetrackAgents
             double latOff, angOff;
             _track.LaneOffsets(v, out latOff, out angOff);
 
-            int cell = ix * CellsY + iy;
-            const int L = CellsX * CellsY;
-            grid[F_PRESENCE * L + cell] = 1f;
-            grid[F_X * L + cell] = HwMath.Clamp1(HwMath.Lmap(dx, -XRange, XRange, -1, 1));
-            grid[F_Y * L + cell] = HwMath.Clamp1(HwMath.Lmap(dy, -YRange, YRange, -1, 1));
-            grid[F_VX * L + cell] = HwMath.Clamp1(HwMath.Lmap(dvx, -VxRange, VxRange, -1, 1));
-            grid[F_VY * L + cell] = HwMath.Clamp1(HwMath.Lmap(dvy, -VyRange, VyRange, -1, 1));
-            grid[F_COS_H * L + cell] = HwMath.Clamp1(Math.Cos(v.Heading));
-            grid[F_SIN_H * L + cell] = HwMath.Clamp1(Math.Sin(v.Heading));
-            grid[F_LAT_OFF * L + cell] = HwMath.Clamp1(HwMath.Lmap(latOff, -LatOffRange, LatOffRange, -1, 1));
-            grid[F_ANG_OFF * L + cell] = HwMath.Clamp1(HwMath.Lmap(angOff, -AngOffRange, AngOffRange, -1, 1));
+            // HWC: all 10 features of one cell are contiguous
+            int cell = (ix * CellsY + iy) * FeatureCount;
+            grid[cell + F_PRESENCE] = 1f;
+            grid[cell + F_X] = HwMath.Clamp1(HwMath.Lmap(dx, -XRange, XRange, -1, 1));
+            grid[cell + F_Y] = HwMath.Clamp1(HwMath.Lmap(dy, -YRange, YRange, -1, 1));
+            grid[cell + F_VX] = HwMath.Clamp1(HwMath.Lmap(dvx, -VxRange, VxRange, -1, 1));
+            grid[cell + F_VY] = HwMath.Clamp1(HwMath.Lmap(dvy, -VyRange, VyRange, -1, 1));
+            grid[cell + F_COS_H] = HwMath.Clamp1(Math.Cos(v.Heading));
+            grid[cell + F_SIN_H] = HwMath.Clamp1(Math.Sin(v.Heading));
+            grid[cell + F_LAT_OFF] = HwMath.Clamp1(HwMath.Lmap(latOff, -LatOffRange, LatOffRange, -1, 1));
+            grid[cell + F_ANG_OFF] = HwMath.Clamp1(HwMath.Lmap(angOff, -AngOffRange, AngOffRange, -1, 1));
         }
 
         // pos_to_index with align_to_vehicle_axes=True: rotate the RELATIVE
@@ -468,18 +474,18 @@ namespace RacetrackAgents
             return ix >= 0 && ix < CellsX && iy >= 0 && iy < CellsY;
         }
 
-        // Reorder CHW (the MODEL's layout) into HWC [H=CellsX, W=CellsY, C=10]
-        // for engine-side tensor APIs that want channels-last memory.
-        // WARNING: the ONNX input "obs" is [1, 10, 12, 12] channels-FIRST.
-        // Only use HWC if your inference API explicitly performs the layout
-        // mapping; feeding this array raw into the CHW input scrambles it.
-        public static void ChwToHwc(float[] chw, float[] hwc)
+        // Reorder HWC (this builder's native layout) into CHW
+        // [C=10, H=CellsX, W=CellsY] for channels-first consumers — e.g. the
+        // notebook's torch.onnx export, whose "obs" input is [1, 10, 12, 12].
+        // WARNING: pick the layout your inference API actually expects;
+        // feeding one layout into the other's input scrambles the grid.
+        public static void HwcToChw(float[] hwc, float[] chw)
         {
             for (int f = 0; f < FeatureCount; f++)
                 for (int ix = 0; ix < CellsX; ix++)
                     for (int iy = 0; iy < CellsY; iy++)
-                        hwc[(ix * CellsY + iy) * FeatureCount + f] =
-                            chw[(f * CellsX + ix) * CellsY + iy];
+                        chw[(f * CellsX + ix) * CellsY + iy] =
+                            hwc[(ix * CellsY + iy) * FeatureCount + f];
         }
     }
 
@@ -505,7 +511,7 @@ namespace RacetrackAgents
     //           npcBuffer.Add(new VehicleState(...same fields...));
     //
     //       if (updater.Update(Time.fixedDeltaTime, ego, npcBuffer)) {
-    //           onnx.Run(updater.ObsCHW);                   // [1,10,12,12]
+    //           onnx.Run(updater.ObsHWC);                   // [1,12,12,10]
     //           ActionDecoder.Decode(onnx.Output, out accel, out steer);
     //       }
     //       ApplyAction(accel, steer);   // hold latest action every tick
@@ -515,8 +521,8 @@ namespace RacetrackAgents
         public const double PolicyPeriod = 0.2;   // policy_frequency = 5 Hz
 
         private readonly OccupancyGridBuilder _builder;
-        private readonly float[] _chw = new float[OccupancyGridBuilder.TensorLength];
         private readonly float[] _hwc = new float[OccupancyGridBuilder.TensorLength];
+        private readonly float[] _chw = new float[OccupancyGridBuilder.TensorLength];
         private double _timer = PolicyPeriod;     // fire on the first call
 
         public ObservationUpdater(Track track)
@@ -524,13 +530,14 @@ namespace RacetrackAgents
             _builder = new OccupancyGridBuilder(track);
         }
 
-        // Model-ready tensor, channels-first [1, 10, 12, 12]. Feed THIS to
-        // the ONNX "obs" input.
-        public float[] ObsCHW { get { return _chw; } }
-
-        // Same observation as [Height=12 (longitudinal), Width=12 (lateral),
-        // Channels=10]. See ChwToHwc warning before using.
+        // Model-ready tensor, channels-last [Height=12 (longitudinal),
+        // Width=12 (lateral), Channels=10]. Feed THIS to the model input.
         public float[] ObsHWC { get { return _hwc; } }
+
+        // Same observation reordered channels-first [1, 10, 12, 12] — the
+        // layout of the notebook's raw torch.onnx export. See HwcToChw
+        // warning before using.
+        public float[] ObsCHW { get { return _chw; } }
 
         // Call every game tick with the CURRENT vehicle states (track frame).
         // Returns true when a fresh observation was produced (every 0.2 s of
@@ -549,8 +556,8 @@ namespace RacetrackAgents
         // Rebuild both layouts immediately, ignoring the timer.
         public void Refresh(VehicleState ego, IList<VehicleState> npcs)
         {
-            _builder.BuildInto(_chw, ego, npcs);
-            OccupancyGridBuilder.ChwToHwc(_chw, _hwc);
+            _builder.BuildInto(_hwc, ego, npcs);
+            OccupancyGridBuilder.HwcToChw(_hwc, _chw);
         }
     }
 

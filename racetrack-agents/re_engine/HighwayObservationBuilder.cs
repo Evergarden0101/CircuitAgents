@@ -6,9 +6,12 @@
 // embedded, so lat_off / ang_off / on_road are fully implemented — no
 // spline system, no other files, no engine dependencies.
 //
-// Output: float[1440] = float32 tensor [1, 10, 12, 12] CHANNELS-FIRST,
-//         flat index = feature*144 + cellX*12 + cellY. Feed directly to the
-//         ONNX input "obs".
+// Output: float[1440] = float32 tensor [1, 12, 12, 10] CHANNELS-LAST (HWC),
+//         flat index = (cellX*12 + cellY)*10 + feature. Feed directly to a
+//         model input expecting an H*W*C sequence.
+//         (The notebook's raw torch.onnx export is channels-first
+//          [1, 10, 12, 12]; reorder with chw[(f*12+ix)*12+iy] =
+//          hwc[(ix*12+iy)*10+f] if you target that layout instead.)
 //
 // !! Corrections vs the "naive" template this replaces (each of these would
 //    silently break the model, verified against the real environment):
@@ -121,7 +124,7 @@ namespace RacetrackSingle
                     lane.Point(sc, out wx, out wy);
                     int gx, gy;
                     if (CellOf(wx - ego.Position.X, wy - ego.Position.Y, cosH, sinH, out gx, out gy))
-                        obs[(int)Feature.OnRoad * CellsX * CellsY + gx * CellsY + gy] = 1f;
+                        obs[(gx * CellsY + gy) * FeatureCount + (int)Feature.OnRoad] = 1f;
                 }
             }
 
@@ -154,18 +157,18 @@ namespace RacetrackSingle
             double latOff, angOff;
             LaneOffsets(v.Position.X, v.Position.Y, v.Heading, out latOff, out angOff);
 
-            const int L = CellsX * CellsY;
-            int cell = gx * CellsY + gy;
+            // HWC: all 10 features of one cell are contiguous
+            int cell = (gx * CellsY + gy) * FeatureCount;
 
-            obs[(int)Feature.Presence   * L + cell] = 1f;
-            obs[(int)Feature.X          * L + cell] = Norm(dx, XRange);
-            obs[(int)Feature.Y          * L + cell] = Norm(dy, YRange);
-            obs[(int)Feature.VX         * L + cell] = Norm(dvx, VxRange);
-            obs[(int)Feature.VY         * L + cell] = Norm(dvy, VyRange);
-            obs[(int)Feature.CosHeading * L + cell] = (float)Math.Cos(v.Heading); // ABSOLUTE
-            obs[(int)Feature.SinHeading * L + cell] = (float)Math.Sin(v.Heading);
-            obs[(int)Feature.LatOffset  * L + cell] = Norm(latOff, LatRange);
-            obs[(int)Feature.AngOffset  * L + cell] = Norm(angOff, AngRange);
+            obs[cell + (int)Feature.Presence]   = 1f;
+            obs[cell + (int)Feature.X]          = Norm(dx, XRange);
+            obs[cell + (int)Feature.Y]          = Norm(dy, YRange);
+            obs[cell + (int)Feature.VX]         = Norm(dvx, VxRange);
+            obs[cell + (int)Feature.VY]         = Norm(dvy, VyRange);
+            obs[cell + (int)Feature.CosHeading] = (float)Math.Cos(v.Heading); // ABSOLUTE
+            obs[cell + (int)Feature.SinHeading] = (float)Math.Sin(v.Heading);
+            obs[cell + (int)Feature.LatOffset]  = Norm(latOff, LatRange);
+            obs[cell + (int)Feature.AngOffset]  = Norm(angOff, AngRange);
         }
 
         // ============================================================
