@@ -261,6 +261,33 @@ namespace RacetrackSingle
         }
 
         // ============================================================
+        // Heading helpers — heading is COUNTER-clockwise from track +x
+        // (the a->b straight); engine yaw is CLOCKWISE from +Z. With the
+        // Y-up mapping (track.x = world.X, track.y = world.Z):
+        //   heading = Atan2(forward.Z, forward.X) = 90° - yaw.
+        // A car spawned with yRotation = 90 faces a->b -> heading 0. If you
+        // pass raw yaw as heading, every observation is rotated ~90° and
+        // the grid preview points sideways.
+        // ============================================================
+
+        public static float HeadingFromForward(Vector3 forward)
+        {
+            return (float)Math.Atan2(forward.Z, forward.X);
+        }
+
+        // Row-major/row-vector matrices (System.Numerics, DirectX): the
+        // world-space forward (local +Z) axis is row 3 = (M31, M32, M33).
+        public static float HeadingFromWorldMatrix(Matrix4x4 m)
+        {
+            return (float)Math.Atan2(m.M33, m.M31);
+        }
+
+        public static float HeadingFromEulerYawDegrees(float yawDegrees)
+        {
+            return (float)WrapToPi((90.0 - yawDegrees) * Math.PI / 180.0);
+        }
+
+        // ============================================================
         // Utilities
         // ============================================================
 

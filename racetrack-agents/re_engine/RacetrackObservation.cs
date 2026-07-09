@@ -584,6 +584,45 @@ namespace RacetrackAgents
         }
     }
 
+    // ------------------------------------------------------- heading helpers
+    // The track-frame heading is the angle of the car's forward direction in
+    // the (track.x, track.y) plane, atan2 convention: 0 = +x (the a->b
+    // straight), +pi/2 = +y, measured COUNTER-clockwise. With the usual
+    // Y-up mapping (track.x = world.X, track.y = world.Z):
+    //
+    //   * From the FORWARD VECTOR (preferred — convention-proof): any
+    //     initial model rotation (e.g. the ego spawning with yRotation=90
+    //     to face a->b) is already baked into the vector, nothing to add.
+    //   * From a WORLD MATRIX: the forward basis vector is the local +Z
+    //     axis transformed to world; row-major/row-vector layout
+    //     (System.Numerics, DirectX) puts it in row 3 = (M31, M32, M33).
+    //   * From EULER ANGLES: engine yaw is measured CLOCKWISE from +Z
+    //     (viewed from above), while heading is counter-clockwise from +X —
+    //     so heading = 90° - yaw. A car with yRotation = 90 faces a->b:
+    //     heading = 0. Feeding raw yaw as heading rotates every observation
+    //     by ~90° (the classic "grid points sideways" symptom).
+    public static class Heading
+    {
+        // forward = the car's forward unit vector in world space (X, Z used)
+        public static double FromForward(double forwardX, double forwardZ)
+        {
+            return Math.Atan2(forwardZ, forwardX);
+        }
+
+        // m31/m33 = X and Z of the matrix row (or column, if column-major)
+        // holding the transformed local +Z axis
+        public static double FromWorldMatrix(double m31, double m33)
+        {
+            return Math.Atan2(m33, m31);
+        }
+
+        // yawDegrees = Euler Y rotation, clockwise-from-+Z convention
+        public static double FromEulerYawDegrees(double yawDegrees)
+        {
+            return HwMath.WrapToPi((90.0 - yawDegrees) * Math.PI / 180.0);
+        }
+    }
+
     // ------------------------------------------------------- action decoding
     public static class ActionDecoder
     {

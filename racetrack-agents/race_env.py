@@ -137,6 +137,15 @@ class RacetrackFast(AbstractEnv):
             "wall_escape_reward":   0.4,     # bonus for actively reversing from wall
             "wall_stuck_penalty":   0.4,     # penalty for sitting still at wall
             "wall_ride_penalty":    0.6,     # extra penalty ∝ speed while grinding the wall
+            # Escape zone: within this clearance of a wall, reverse/idle
+            # penalties are waived and clearance GAINED is rewarded.
+            # Without it the escape only paid while touching the wall
+            # (~0.15 m band): one step into a successful reverse, the
+            # -0.8 reverse penalty resumed — so policies learned to creep
+            # along the wall instead of backing away.
+            "wall_escape_zone":      1.0,    # [m] clearance treated as "escaping"
+            "wall_escape_progress":  0.8,    # reward per m of clearance gained in
+                                             # the zone (clipped to [-0.2, +0.4]/step)
             # Terminate after this many consecutive steps of wall contact at
             # ANY speed (7 s @ 5 Hz). Covers both the parked-against-the-wall
             # case and the grinding-along-the-wall exploit with one rule.
@@ -153,6 +162,7 @@ class RacetrackFast(AbstractEnv):
         self.lap_count          = 0
         self.episode_step       = 0
         self.wall_contact_steps = 0     # consecutive steps touching a wall (any speed)
+        self._prev_wall_gap     = None  # for escape-progress shaping
         self._make_road()
         self._make_vehicles()
 
@@ -483,6 +493,17 @@ class RacetrackFast(AbstractEnv):
         else:
             self.wall_contact_steps = 0
 
+        # Escape zone: a band of clearance around the walls (wider than the
+        # ~0.15 m contact band) in which the escape manoeuvre is protected —
+        # reverse/idle penalties are waived and clearance gained is rewarded
+        wall_state = self._wall_state(self.vehicle)
+        wall_gap   = wall_state[0] if wall_state is not None else None
+        escape_zone = self.config.get("wall_escape_zone", 1.0)
+        near_wall = (
+            wall_gap is not None and wall_gap < escape_zone
+            and not self.vehicle.crashed
+        )
+
         # ── 2. Speed reward — negative for reversing, not zero ─────────
         # Forward:  [0, speed_limit] → [0.0, +1.0]
         # Reverse:  [ego_min, 0]     → [-1.0, 0.0]
@@ -540,7 +561,10 @@ class RacetrackFast(AbstractEnv):
 
         # ── Reverse and idle penalties ──────────────────────────────
         # Reverse: discrete signal so policy cannot rationalize away gradual drift
-        if at_wall:
+        # Waived in the whole escape zone, not just at contact: punishing
+        # reverse one step after it pulls the car off the wall taught the
+        # policy to creep along the wall instead of backing away.
+        if near_wall:
             reverse_penalty = 0.0
             idle_penalty    = 0.0
         else:
@@ -582,6 +606,21 @@ class RacetrackFast(AbstractEnv):
                     + self.config.get("wall_ride_penalty", 0.6) * ride
                 )
 
+        # ── Escape-progress shaping ─────────────────────────────────────
+        # Pays for clearance GAINED while inside the escape zone (and mildly
+        # charges clearance lost), so the reward keeps flowing through the
+        # whole reverse-out manoeuvre, not only while touching the wall.
+        # Asymmetric clip: escaping earns up to +0.4/step, approaching costs
+        # at most -0.2 (contact itself is already penalised above).
+        if near_wall and wall_gap is not None:
+            prev_gap = self._prev_wall_gap if self._prev_wall_gap is not None else wall_gap
+            gap_delta = (float(np.clip(wall_gap, 0.0, escape_zone))
+                         - float(np.clip(prev_gap, 0.0, escape_zone)))
+            wall_escape_reward += float(np.clip(
+                self.config.get("wall_escape_progress", 0.8) * gap_delta,
+                -0.2, 0.4))
+        self._prev_wall_gap = wall_gap
+
 
         # ──  Compose base reward ─────────────────────────────────────
         reward = (
@@ -593,7 +632,7 @@ class RacetrackFast(AbstractEnv):
             + jerk_penalty   # [-0.4, 0]     no steering direction flips
             + reverse_penalty# [-0.8, 0]     discrete reverse hit
             + idle_penalty   # [-0.8, 0]     discrete idle hit (exclusive with reverse)
-            + wall_escape_reward  # [-1.0, +0.4]
+            + wall_escape_reward  # [-1.2, +0.8] incl. escape-progress shaping
         )
 
         # ── Crash penalty — overrides everything including offroad ───
