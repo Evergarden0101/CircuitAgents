@@ -71,6 +71,11 @@ class RacetrackFast(AbstractEnv):
             "screen_width": 1000,
             "screen_height": 1000,
             "centering_position": [0.5, 0.5],
+            # Track selection: "fast" (9-segment circuit), "oval"
+            # (2 straights + 2 half-circles), or "random" (new choice every
+            # episode — use for training policies that must generalize
+            # across tracks instead of memorizing one)
+            "track": "fast",
             # Vehicles
             "controlled_vehicles": 1,
             "other_vehicles": 0,
@@ -152,9 +157,51 @@ class RacetrackFast(AbstractEnv):
         self._make_vehicles()
 
     def _make_road(self) -> None:
+        """Build the configured track. Sets, per track:
+        self.segment_sequence — lap order for the checkpoint bonus
+        self.spawn_options    — lane keys the ego may spawn on
+        """
+        track = self.config.get("track", "fast")
+        if track == "random":
+            track = ("fast", "oval")[int(self.np_random.integers(0, 2))]
+        self.active_track = track
+        if track == "oval":
+            self._make_road_oval()
+        else:
+            self._make_road_fast()
+
+    def _make_road_oval(self) -> None:
+        """Two-lane oval: 80 m straights joined by 25/30 m half-circles.
+        Gentler than the fast circuit — used as the generalization probe
+        (train on "random", evaluate here) or as an easier curriculum."""
+        net = RoadNetwork()
+        sl = 16
+
+        net.add_lane("a", "b", StraightLane([0, 0], [80, 0], line_types=(LineType.CONTINUOUS, LineType.STRIPED), width=5, speed_limit=sl))
+        net.add_lane("a", "b", StraightLane([0, 5], [80, 5], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center1 = [80, -25]
+        net.add_lane("b", "c", CircularLane(center1, 25, np.deg2rad(90), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("b", "c", CircularLane(center1, 30, np.deg2rad(90), np.deg2rad(-90), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        net.add_lane("c", "d", StraightLane([80, -50], [0, -50], line_types=(LineType.CONTINUOUS, LineType.NONE), width=5, speed_limit=sl))
+        net.add_lane("c", "d", StraightLane([80, -55], [0, -55], line_types=(LineType.STRIPED, LineType.CONTINUOUS), width=5, speed_limit=sl))
+
+        center2 = [0, -25]
+        net.add_lane("d", "a", CircularLane(center2, 25, np.deg2rad(-90), np.deg2rad(-270), width=5, clockwise=False, line_types=(LineType.CONTINUOUS, LineType.NONE), speed_limit=sl))
+        net.add_lane("d", "a", CircularLane(center2, 30, np.deg2rad(-90), np.deg2rad(-270), width=5, clockwise=False, line_types=(LineType.STRIPED, LineType.CONTINUOUS), speed_limit=sl))
+
+        self.segment_sequence = ["a", "b", "c", "d"]
+        self.spawn_options = [
+            ("a", "b", 0), ("a", "b", 1),
+            ("c", "d", 0), ("c", "d", 1),
+        ]
+        self.road = Road(network=net, np_random=self.np_random, record_history=self.config["show_trajectories"])
+
+    def _make_road_fast(self) -> None:
         net = RoadNetwork()
 
-        # A compact oval made of straights and arcs (inspired by racetrack_env)
+        # A compact circuit made of straights and arcs (inspired by racetrack_env)
         speedlimits = [None, 16, 16, 16, 16, 16, 16, 16, 16]
 
         lane = StraightLane([42, 0], [100, 0], line_types=(LineType.CONTINUOUS, LineType.STRIPED), width=5, speed_limit=speedlimits[1])
@@ -198,6 +245,13 @@ class RacetrackFast(AbstractEnv):
         net.add_lane("i", "a", CircularLane(center5, radii5 + 5, np.deg2rad(240), np.deg2rad(270), width=5, clockwise=True, line_types=(LineType.CONTINUOUS, LineType.STRIPED), speed_limit=speedlimits[8]))
         net.add_lane("i", "a", CircularLane(center5, radii5, np.deg2rad(238), np.deg2rad(268), width=5, clockwise=True, line_types=(LineType.NONE, LineType.CONTINUOUS), speed_limit=speedlimits[8]))
 
+        self.segment_sequence = list(self.SEGMENT_SEQUENCE)
+        self.spawn_options = [
+            ("a", "b", 0), ("a", "b", 1),
+            ("c", "d", 0),
+            ("f", "g", 0),
+            ("h", "i", 0),
+        ]
         self.road = Road(network=net, np_random=self.np_random, record_history=self.config["show_trajectories"])
 
     def _make_vehicles(self) -> None:
@@ -214,13 +268,7 @@ class RacetrackFast(AbstractEnv):
         ⑤ Separation    — dynamic, speed-proportional safety gap
         """
         rng = self.np_random
-        spawn_options = [
-            ("a", "b", 0),
-            ("a", "b", 1),
-            ("c", "d", 0),
-            ("f", "g", 0),
-            ("h", "i", 0),
-        ]
+        spawn_options = self.spawn_options   # set by the track builder
         spawn_idx = int(rng.integers(0, len(spawn_options)))
         spawn_lane_key = spawn_options[spawn_idx]
 
@@ -322,7 +370,7 @@ class RacetrackFast(AbstractEnv):
             if current_start == self.last_segment_start:
                 return 0.0   # still on the same segment, no bonus
 
-            seq = self.SEGMENT_SEQUENCE
+            seq = getattr(self, "segment_sequence", self.SEGMENT_SEQUENCE)
             try:
                 last_idx    = seq.index(self.last_segment_start)
                 current_idx = seq.index(current_start)

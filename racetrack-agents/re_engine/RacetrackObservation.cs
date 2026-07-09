@@ -478,6 +478,25 @@ namespace RacetrackAgents
             return ix >= 0 && ix < CellsX && iy >= 0 && iy < CellsY;
         }
 
+        // INVERSE of PosToIndex, for debug-drawing the grid: world-frame
+        // centre of cell (ix, iy). The grid's +x axis IS the ego heading —
+        // ix grows toward where the car FACES (-9 m behind .. +27 m ahead),
+        // iy grows toward the car's LEFT. If your overlay shows the 27 m
+        // preview pointing world-east ("right") regardless of the car's
+        // heading, your draw code skipped this ego rotation; if it is
+        // mirrored/rotated the wrong way, it used the world->ego rotation
+        // (PosToIndex above) instead of this ego->world one — note the
+        // transposed signs on sinH.
+        public static void CellCenterWorld(int ix, int iy, VehicleState ego,
+                                           out double wx, out double wy)
+        {
+            double lx = GridMinX + (ix + 0.5) * StepX;   // forward, ego frame
+            double ly = GridMinY + (iy + 0.5) * StepY;   // left,    ego frame
+            double c = Math.Cos(ego.Heading), s = Math.Sin(ego.Heading);
+            wx = ego.X + c * lx - s * ly;
+            wy = ego.Y + s * lx + c * ly;
+        }
+
         // Reorder HWC (this builder's native layout) into CHW
         // [C=10, H=CellsX, W=CellsY] for channels-first consumers — e.g. the
         // notebook's torch.onnx export, whose "obs" input is [1, 10, 12, 12].

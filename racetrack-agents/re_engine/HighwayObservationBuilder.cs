@@ -244,6 +244,22 @@ namespace RacetrackSingle
             return gx >= 0 && gx < CellsX && gy >= 0 && gy < CellsY;
         }
 
+        // INVERSE of CellOf, for debug-drawing the grid: world-frame centre
+        // of cell (gx, gy). The grid's +x axis IS the ego heading — gx grows
+        // toward where the car FACES (-9 m behind .. +27 m ahead), gy toward
+        // the car's LEFT. A grid that always points world-east ("right")
+        // means the draw code skipped this rotation; a mirrored one means it
+        // used CellOf's world->ego rotation (transposed sin signs) instead.
+        public static void CellCenterWorld(int gx, int gy, Vehicle ego,
+                                           out double wx, out double wy)
+        {
+            double lx = GridMinX + (gx + 0.5) * GridStep;   // forward, ego frame
+            double ly = GridMinY + (gy + 0.5) * GridStep;   // left,    ego frame
+            double c = Math.Cos(ego.Heading), s = Math.Sin(ego.Heading);
+            wx = ego.Position.X + c * lx - s * ly;
+            wy = ego.Position.Y + s * lx + c * ly;
+        }
+
         // ============================================================
         // Utilities
         // ============================================================
