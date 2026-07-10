@@ -316,6 +316,46 @@ namespace RacetrackSingle
         }
 
         // ============================================================
+        // Wall clearance — position-based "am I at a wall?"
+        // ============================================================
+        // Mirror of race_env._wall_state(): the track corridor is PAIRS of
+        // parallel lanes and only the corridor's OUTER edges are walls (the
+        // painted line between the two lanes is not). Lanes must be supplied
+        // in corridor order — lane 0 then lane 1 of each segment,
+        // consecutively — which every preset and track_<name>.json obeys.
+        //
+        // Returns the gap [m] between the car BODY edge and the nearest wall:
+        //   ~1.5  centered in a boundary lane      ~4.0  on the divider
+        //   <= 0  body touching/overlapping a wall
+        // Use it to gate StuckRecovery: a slow standing start in the middle
+        // of the road has clearance >= 1 m and must NOT trigger reverse.
+        public double WallClearance(double px, double py, double vehicleWidth)
+        {
+            int best = 0;
+            double bestScore = double.PositiveInfinity;
+            for (int i = 0; i < _lanes.Length; i++)
+            {
+                double s, lat;
+                _lanes[i].Local(px, py, out s, out lat);
+                double score = Math.Abs(lat)
+                             + Math.Max(s - _lanes[i].Length, 0.0)
+                             + Math.Max(-s, 0.0);
+                if (score < bestScore) { bestScore = score; best = i; }
+            }
+            int pairBase = best - (best % 2);   // corridor = [pairBase, pairBase+1]
+            Lane first = _lanes[pairBase];
+            Lane last = _lanes[Math.Min(pairBase + 1, _lanes.Length - 1)];
+            double sF, latF, sL, latL;
+            first.Local(px, py, out sF, out latF);
+            last.Local(px, py, out sL, out latL);
+            const double HalfLane = 2.5;        // all lanes are 5 m wide
+            double halfCar = vehicleWidth / 2.0;
+            double lowClear = (latF + HalfLane) - halfCar;   // lane-0-side wall
+            double highClear = (HalfLane - latL) - halfCar;  // lane-1-side wall
+            return Math.Min(lowClear, highClear);
+        }
+
+        // ============================================================
         // Deployment assists
         // ============================================================
 
@@ -350,10 +390,34 @@ namespace RacetrackSingle
             public double StuckSeconds   = 1.0;   // stopped this long => trigger
             public double ReverseSeconds = 1.6;   // how long to back up
             public double ReverseAccel   = -3.0;  // override accel [m/s^2]
+            // Wall gate for the clearance overload: only arm the stuck timer
+            // when the car BODY is within this gap of a wall. Distinguishes
+            // "pinned against a wall" from a slow standing start mid-road
+            // (spawn clearance is >= ~1 m; wall contact is ~0).
+            public double NearWallClearance = 0.3;
             double _stoppedFor, _reverseLeft;
             public bool Reversing { get { return _reverseLeft > 0.0; } }
 
+            // Speed-only variant (no track geometry at hand). A standing
+            // start can look "blocked" for StuckSeconds — prefer the
+            // clearance overload below when a builder is available.
             public bool Update(double dt, double speed, double commandedAccel)
+            {
+                return Step(dt, Math.Abs(speed) < StuckSpeed && commandedAccel > 0.0);
+            }
+
+            // Position-gated variant: pass builder.WallClearance(...) so a
+            // slow car in the middle of the road never triggers reverse.
+            public bool Update(double dt, double speed, double commandedAccel,
+                               double wallClearance)
+            {
+                bool blocked = Math.Abs(speed) < StuckSpeed
+                            && commandedAccel > 0.0
+                            && wallClearance <= NearWallClearance;
+                return Step(dt, blocked);
+            }
+
+            bool Step(double dt, bool blocked)
             {
                 if (_reverseLeft > 0.0)
                 {
@@ -361,7 +425,6 @@ namespace RacetrackSingle
                     if (_reverseLeft <= 0.0) _stoppedFor = 0.0;
                     return _reverseLeft > 0.0;
                 }
-                bool blocked = Math.Abs(speed) < StuckSpeed && commandedAccel > 0.0;
                 _stoppedFor = blocked ? _stoppedFor + dt : 0.0;
                 if (_stoppedFor >= StuckSeconds)
                 {

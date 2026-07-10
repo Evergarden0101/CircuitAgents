@@ -174,6 +174,25 @@ static class Program
             Console.WriteLine($"  {(pass ? "PASS" : "FAIL")}  {name,-8} lanes={preset.Length} maxDiff={worst:E2}");
         }
 
+        // ---- WallClearance parity: known geometry on the a->b straight ----
+        // (car width 2.0, matching training: lane-0 centre -> 1.5 m free,
+        // divider -> 4.0 m, 0.7 m past either wall -> -0.7)
+        Console.WriteLine("--- wall clearance (car width 2.0) ---");
+        var wcTrack = Track.BuildRacetrackFast();
+        var wcSingle = new RacetrackSingle.HighwayObservationBuilder(
+            RacetrackSingle.HighwayObservationBuilder.RacetrackFastLanes());
+        (double y, double expect)[] wcCases = {
+            (0.0, 1.5), (2.5, 4.0), (5.0, 1.5), (7.2, -0.7), (-2.2, -0.7),
+        };
+        foreach (var (y, expect) in wcCases)
+        {
+            double a = wcTrack.WallClearance(new Vec2(70, y), 2.0);
+            double b = wcSingle.WallClearance(70, y, 2.0);
+            bool ok = Math.Abs(a - expect) < 1e-9 && Math.Abs(b - expect) < 1e-9;
+            allPass &= ok;
+            Console.WriteLine($"  {(ok ? "PASS" : "FAIL")}  y={y,5:F1} -> track={a:F2} single={b:F2} (expect {expect:F2})");
+        }
+
         Console.WriteLine(allPass ? "ALL SCENARIOS MATCH" : "MISMATCH DETECTED");
         return allPass ? 0 : 1;
     }

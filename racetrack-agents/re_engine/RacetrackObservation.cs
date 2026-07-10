@@ -368,6 +368,35 @@ namespace RacetrackAgents
             return best;
         }
 
+        // Wall clearance — position-based "am I at a wall?". Mirror of
+        // race_env._wall_state(): the corridor is PAIRS of parallel lanes
+        // (lane 0 then lane 1 of each segment, consecutive in Lanes — true
+        // for BuildRacetrackFast and every track_<name>.json) and only the
+        // corridor's OUTER edges are walls. Returns the gap [m] between the
+        // car BODY edge and the nearest wall (~1.5 centered in a boundary
+        // lane, ~4.0 on the divider, <= 0 touching). Gate StuckRecovery
+        // with this so a slow standing start mid-road never reverses.
+        public double WallClearance(Vec2 p, double vehicleWidth)
+        {
+            int best = 0;
+            double bestScore = double.PositiveInfinity;
+            for (int i = 0; i < Lanes.Count; i++)
+            {
+                double d = Lanes[i].Distance(p);
+                if (d < bestScore) { bestScore = d; best = i; }
+            }
+            int pairBase = best - (best % 2);
+            Lane first = Lanes[pairBase];
+            Lane last = Lanes[Math.Min(pairBase + 1, Lanes.Count - 1)];
+            double sF, latF, sL, latL;
+            first.LocalCoordinates(p, out sF, out latF);
+            last.LocalCoordinates(p, out sL, out latL);
+            double halfCar = vehicleWidth / 2.0;
+            double lowClear = (latF + first.Width / 2.0) - halfCar;
+            double highClear = (last.Width / 2.0 - latL) - halfCar;
+            return Math.Min(lowClear, highClear);
+        }
+
         // lat_off / ang_off of a vehicle, exactly like Vehicle.lane_offset
         public void LaneOffsets(VehicleState v, out double latOff, out double angOff)
         {
@@ -678,12 +707,33 @@ namespace RacetrackAgents
         private double _stoppedFor;
         private double _reverseLeft;
 
+        // Wall gate for the clearance overload: only arm the stuck timer
+        // when the car BODY is within this gap of a wall. Distinguishes
+        // "pinned against a wall" from a slow standing start mid-road.
+        public double NearWallClearance = 0.3;
+
         public bool Reversing { get { return _reverseLeft > 0.0; } }
 
-        // Call every policy tick with the tick duration, the ego speed and
-        // the acceleration the policy commanded. True while the caller
-        // should OVERRIDE the policy action with reverse.
+        // Speed-only variant (no track geometry at hand). A standing start
+        // can look "blocked" for StuckSeconds — prefer the clearance
+        // overload when a Track is available.
         public bool Update(double dt, double speed, double commandedAccel)
+        {
+            return Step(dt, Math.Abs(speed) < StuckSpeed && commandedAccel > 0.0);
+        }
+
+        // Position-gated variant: pass track.WallClearance(egoPos, carWidth)
+        // so a slow car in the middle of the road never triggers reverse.
+        public bool Update(double dt, double speed, double commandedAccel,
+                           double wallClearance)
+        {
+            bool blocked = Math.Abs(speed) < StuckSpeed
+                        && commandedAccel > 0.0
+                        && wallClearance <= NearWallClearance;
+            return Step(dt, blocked);
+        }
+
+        private bool Step(double dt, bool blocked)
         {
             if (_reverseLeft > 0.0)
             {
@@ -691,7 +741,6 @@ namespace RacetrackAgents
                 if (_reverseLeft <= 0.0) _stoppedFor = 0.0;
                 return _reverseLeft > 0.0;
             }
-            bool blocked = Math.Abs(speed) < StuckSpeed && commandedAccel > 0.0;
             _stoppedFor = blocked ? _stoppedFor + dt : 0.0;
             if (_stoppedFor >= StuckSeconds)
             {
