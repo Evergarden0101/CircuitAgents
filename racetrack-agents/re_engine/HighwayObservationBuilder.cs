@@ -452,6 +452,53 @@ namespace RacetrackSingle
             public void Reset() { _windowActive = false; _reverseLeft = 0.0; }
         }
 
+        // Car-dynamics limits for the REAL game vehicle. The sim car steers
+        // instantly and corners at full grip; an engine car cannot. Two guards,
+        // applied AFTER SteeringSmoother, BEFORE the StuckRecovery override:
+        //   1. steering RATE limit — the wheel moves at most MaxSteerRate rad/s
+        //      toward the commanded angle (no instant lock-to-lock snaps).
+        //   2. cornering brake — bicycle-model curvature k = |tan(steer)| / Wheelbase
+        //      implies lateral acceleration v^2 * k. Above the grip budget
+        //      (MaxLateralAccel) the limiter lifts the throttle and applies a
+        //      SMALL brake (BrakeAccel), so the car slows into tight turns
+        //      instead of understeering into the wall.
+        // Defaults: full lock (30 deg) caps cornering at ~6.8 m/s; a gentle
+        // 0.1 rad command doesn't brake below ~16 m/s — straights unaffected.
+        public sealed class CorneringLimiter
+        {
+            public double Wheelbase       = 4.5;   // [m] match the game car
+            public double MaxSteerRate    = 2.0;   // [rad/s] ~0.5 s lock-to-lock
+            public double MaxLateralAccel = 6.0;   // [m/s^2] grip budget
+            public double BrakeAccel      = -1.5;  // small brake when over the limit
+            public double LiftMargin      = 0.9;   // lift throttle above this fraction
+
+            private double _steer;                 // current rate-limited wheel angle
+
+            // Call once per policy tick with the SMOOTHED command; modifies
+            // accel/steer in place. speed in m/s.
+            public void Apply(double dt, double speed, ref double accel, ref double steer)
+            {
+                double maxDelta = MaxSteerRate * dt;
+                double delta = steer - _steer;
+                if (delta > maxDelta) delta = maxDelta;
+                if (delta < -maxDelta) delta = -maxDelta;
+                _steer += delta;
+                steer = _steer;
+
+                double k = Math.Abs(Math.Tan(_steer)) / Wheelbase;
+                if (k > 1e-6)
+                {
+                    double vLimit = Math.Sqrt(MaxLateralAccel / k);
+                    if (speed > vLimit)
+                        accel = Math.Min(accel, BrakeAccel);       // small brake
+                    else if (speed > LiftMargin * vLimit)
+                        accel = Math.Min(accel, 0.0);              // lift throttle
+                }
+            }
+
+            public void Reset() { _steer = 0.0; }
+        }
+
         // ============================================================
         // Action decoding (ONNX "action_mean" [1,2], UNCLIPPED)
         // ============================================================

@@ -27,6 +27,7 @@ Track track = Track.BuildRacetrackFast();          // or Track.FromData(json)
 ObservationUpdater updater = new ObservationUpdater(track);
 SteeringSmoother smoother = new SteeringSmoother();   // EMA, Alpha 0.6
 StuckRecovery recovery = new StuckRecovery();         // reverse watchdog
+CorneringLimiter limiter = new CorneringLimiter();    // steer rate + turn braking
 List<VehicleState> npcs = new List<VehicleState>();
 
 // every physics tick -------------------------------------------------------
@@ -48,6 +49,9 @@ if (updater.Update(deltaTime, ego, npcs))          // true every 0.2 s (5 Hz)
     onnx.Run(updater.ObsHWC);                      // input [1,12,12,10] HWC
     ActionDecoder.Decode(onnx.Output, out accel, out steer);
     steer = smoother.Smooth(steer);                // kills steering dither
+    // real-car dynamics: rate-limit the wheel and brake gently when the
+    // commanded curvature exceeds the grip budget at current speed
+    limiter.Apply(0.2, egoSpeed, ref accel, ref steer);
     // movement-based stuck check: pinned = commanded forward but the car
     // covered < 0.3 m in 1 s. A standing start moves and never triggers;
     // no lane geometry involved.
