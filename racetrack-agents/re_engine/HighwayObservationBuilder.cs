@@ -466,16 +466,25 @@ namespace RacetrackSingle
         // 0.1 rad command doesn't brake below ~16 m/s — straights unaffected.
         public sealed class CorneringLimiter
         {
-            public double Wheelbase       = 4.5;   // [m] match the game car
-            public double MaxSteerRate    = 2.0;   // [rad/s] ~0.5 s lock-to-lock
-            public double MaxLateralAccel = 6.0;   // [m/s^2] grip budget
-            public double BrakeAccel      = -1.5;  // small brake when over the limit
-            public double LiftMargin      = 0.9;   // lift throttle above this fraction
+            public double Wheelbase        = 4.5;  // [m] match the game car
+            public double MaxSteerRate     = 2.0;  // [rad/s] ~0.5 s lock-to-lock
+            public double MaxLateralAccel  = 6.0;  // [m/s^2] grip budget
+            // The limiter slows the car INTO corners but can never stop it:
+            // vLimit is floored here, and the brake force is PROPORTIONAL to the
+            // overspeed (BrakeGain per m/s over, capped at MaxBrakeAccel), so it
+            // triggers on any overspeed yet fades to zero as the limit is
+            // reached. Below vLimit the policy's throttle passes through
+            // untouched — no lift zone — so the car re-accelerates out of the
+            // corner instead of decaying to a stop under game drag.
+            public double MinCorneringSpeed = 5.0; // [m/s] hard floor for vLimit
+            public double BrakeGain         = 1.0; // [1/s] brake per m/s overspeed
+            public double MaxBrakeAccel     = -3.0;// [m/s^2] strongest brake
 
             private double _steer;                 // current rate-limited wheel angle
 
             // Call once per policy tick with the SMOOTHED command; modifies
-            // accel/steer in place. speed in m/s.
+            // accel/steer in place. speed in m/s; steer in RADIANS (feeding
+            // degrees makes tan() explode and drags the car to a standstill).
             public void Apply(double dt, double speed, ref double accel, ref double steer)
             {
                 double maxDelta = MaxSteerRate * dt;
@@ -486,13 +495,17 @@ namespace RacetrackSingle
                 steer = _steer;
 
                 double k = Math.Abs(Math.Tan(_steer)) / Wheelbase;
-                if (k > 1e-6)
+                if (k <= 1e-6) return;
+
+                double vLimit = Math.Sqrt(MaxLateralAccel / k);
+                if (vLimit < MinCorneringSpeed) vLimit = MinCorneringSpeed;
+
+                double over = speed - vLimit;
+                if (over > 0.0)
                 {
-                    double vLimit = Math.Sqrt(MaxLateralAccel / k);
-                    if (speed > vLimit)
-                        accel = Math.Min(accel, BrakeAccel);       // small brake
-                    else if (speed > LiftMargin * vLimit)
-                        accel = Math.Min(accel, 0.0);              // lift throttle
+                    double brake = -BrakeGain * over;      // gentle near the limit
+                    if (brake < MaxBrakeAccel) brake = MaxBrakeAccel;
+                    accel = Math.Min(accel, brake);
                 }
             }
 
