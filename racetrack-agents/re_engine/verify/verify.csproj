@@ -11,6 +11,7 @@
   <ItemGroup>
     <Compile Include="..\RacetrackObservation.cs" Link="RacetrackObservation.cs" />
     <Compile Include="..\HighwayObservationBuilder.cs" Link="HighwayObservationBuilder.cs" />
+    <Compile Include="..\CarController.cs" Link="CarController.cs" />
   </ItemGroup>
 
 </Project>
