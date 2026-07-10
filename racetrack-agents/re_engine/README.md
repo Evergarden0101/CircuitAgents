@@ -30,9 +30,13 @@ StuckRecovery recovery = new StuckRecovery();         // reverse watchdog
 List<VehicleState> npcs = new List<VehicleState>();
 
 // every physics tick -------------------------------------------------------
+// UNITS: everything is m/s. If your engine's velocity Vector3 is km/h,
+// divide by 3.6 here (HwMath.KphToMs) — kph input silently degrades the
+// model (vx/vy channels clip at +-20 m/s).
+Vector3 velMs = rb.velocityKph / 3.6f;             // kph -> m/s, if needed
 VehicleState ego = new VehicleState(
     tf.position.x, tf.position.z,                  // track x, y  (see frames)
-    rb.velocity.x, rb.velocity.z,
+    velMs.x, velMs.z,
     Math.Atan2(tf.forward.z, tf.forward.x));       // heading [rad]
 
 npcs.Clear();

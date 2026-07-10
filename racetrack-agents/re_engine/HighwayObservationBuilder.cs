@@ -97,10 +97,18 @@ namespace RacetrackSingle
 
         public class Vehicle
         {
-            public Vector3 Position;   // track plane = (X, Y); Z ignored
-            public Vector3 Velocity;   // world velocity, same plane
+            public Vector3 Position;   // track plane = (X, Y); Z ignored [m]
+            public Vector3 Velocity;   // world velocity, same plane — METERS
+                                       // PER SECOND (km/h sources: KphToMs!)
             public float Heading;      // radians, Atan2 convention, track frame
         }
+
+        // ALL speeds/velocities in this contract are m/s. If your engine
+        // provides a km/h Vector3, convert at the boundary — kph input
+        // scales every velocity 3.6x, the vx/vy channels clip at +-20 m/s,
+        // and the model silently degrades with no error anywhere.
+        public static float KphToMs(float kph) { return kph / 3.6f; }
+        public static Vector3 KphToMs(Vector3 kph) { return kph / 3.6f; }
 
         // ============================================================
         // Construction — lanes come from the caller

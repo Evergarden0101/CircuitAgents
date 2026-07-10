@@ -108,6 +108,13 @@ namespace RacetrackAgents
             return outLow + (v - inLow) * (outHigh - outLow) / (inHigh - inLow);
         }
 
+        // ALL speeds/velocities in this contract are METERS PER SECOND in
+        // track axes. If your engine hands you km/h (e.g. a kph Vector3),
+        // convert at the boundary — feeding kph scales every velocity 3.6x:
+        // the vx/vy observation channels clip at +-20 m/s and the model
+        // silently degrades with no error anywhere.
+        public static double KphToMs(double kph) { return kph / 3.6; }
+
         public static float Clamp1(double v)
         {
             if (v < -1.0) return -1f;
@@ -129,7 +136,8 @@ namespace RacetrackAgents
     public struct VehicleState
     {
         public double X, Y;        // position [m]
-        public double Vx, Vy;      // velocity [m/s] (world/track axes)
+        public double Vx, Vy;      // velocity [m/s] (world/track axes) —
+                                   // km/h sources: HwMath.KphToMs first!
         public double Heading;     // [rad], atan2 convention in track axes
 
         public VehicleState(double x, double y, double vx, double vy, double heading)
