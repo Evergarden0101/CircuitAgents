@@ -48,10 +48,10 @@ if (updater.Update(deltaTime, ego, npcs))          // true every 0.2 s (5 Hz)
     onnx.Run(updater.ObsHWC);                      // input [1,12,12,10] HWC
     ActionDecoder.Decode(onnx.Output, out accel, out steer);
     steer = smoother.Smooth(steer);                // kills steering dither
-    // position-gated stuck check: WallClearance distinguishes "pinned
-    // against a wall" from a slow standing start mid-road (same low speed!)
-    double clear = track.WallClearance(new Vec2(ego.X, ego.Y), carWidth);
-    if (recovery.Update(0.2, egoSpeed, accel, clear))
+    // movement-based stuck check: pinned = commanded forward but the car
+    // covered < 0.3 m in 1 s. A standing start moves and never triggers;
+    // no lane geometry involved.
+    if (recovery.Update(0.2, ego.X, ego.Y, accel))
     {
         accel = recovery.ReverseAccel;             // back out straight
         steer = 0.0;

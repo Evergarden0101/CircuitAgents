@@ -684,73 +684,79 @@ namespace RacetrackAgents
         public void Reset() { _y = 0.0; }
     }
 
-    // Stuck detection + reverse indicator. The env pins the car at walls
-    // (wall_mode "stop") and the policy learned to reverse out, but if the
-    // deployed model hesitates or the game's wall physics differ, this
-    // watchdog detects "commanding forward but not moving" and raises
-    // Reversing for ReverseSeconds so the caller overrides the action with
-    // a straight reverse — mirroring the env's escape manoeuvre.
+    // Stuck detection + reverse indicator — MOVEMENT-BASED, no lane
+    // geometry needed. While the policy commands forward, the car must
+    // cover at least MinMoveDistance within WindowSeconds; if it doesn't,
+    // it is pinned (wall, obstacle) and Reversing is raised for
+    // ReverseSeconds so the caller overrides the action with a straight
+    // reverse. A standing start never triggers: even a sluggish 1 m/s^2
+    // launch covers 0.5 m in the first second, which resets the window.
     //
     //   var recovery = new StuckRecovery();
     //   ...per policy tick, after ActionDecoder.Decode(...):
-    //   if (recovery.Update(0.2, egoSpeed, accel)) {
+    //   if (recovery.Update(0.2, ego.X, ego.Y, accel)) {
     //       accel = recovery.ReverseAccel;   // back out
     //       steer = 0.0;                     // keep wheels straight
     //   }
+    //
+    // Position is any consistent ground-plane coordinate pair in METERS
+    // (world or track frame — only differences are used).
     public sealed class StuckRecovery
     {
-        public double StuckSpeed     = 0.5;   // |v| below this = stopped [m/s]
-        public double StuckSeconds   = 1.0;   // stopped this long => trigger
-        public double ReverseSeconds = 1.6;   // how long to back up
-        public double ReverseAccel   = -3.0;  // override acceleration [m/s^2]
+        public double MinMoveDistance = 0.3;   // must move this far ... [m]
+        public double WindowSeconds   = 1.0;   // ... within this long, while
+                                               // commanding forward
+        public double ReverseSeconds  = 1.6;   // how long to back up
+        public double ReverseAccel    = -3.0;  // override acceleration [m/s^2]
 
-        private double _stoppedFor;
+        private bool _windowActive;
+        private double _windowTime, _startX, _startY;
         private double _reverseLeft;
-
-        // Wall gate for the clearance overload: only arm the stuck timer
-        // when the car BODY is within this gap of a wall. Distinguishes
-        // "pinned against a wall" from a slow standing start mid-road.
-        public double NearWallClearance = 0.3;
 
         public bool Reversing { get { return _reverseLeft > 0.0; } }
 
-        // Speed-only variant (no track geometry at hand). A standing start
-        // can look "blocked" for StuckSeconds — prefer the clearance
-        // overload when a Track is available.
-        public bool Update(double dt, double speed, double commandedAccel)
-        {
-            return Step(dt, Math.Abs(speed) < StuckSpeed && commandedAccel > 0.0);
-        }
-
-        // Position-gated variant: pass track.WallClearance(egoPos, carWidth)
-        // so a slow car in the middle of the road never triggers reverse.
-        public bool Update(double dt, double speed, double commandedAccel,
-                           double wallClearance)
-        {
-            bool blocked = Math.Abs(speed) < StuckSpeed
-                        && commandedAccel > 0.0
-                        && wallClearance <= NearWallClearance;
-            return Step(dt, blocked);
-        }
-
-        private bool Step(double dt, bool blocked)
+        // Call every policy tick with the tick duration, the car position
+        // [m] and the acceleration the policy commanded (pre-override).
+        // True while the caller should OVERRIDE the action with reverse.
+        public bool Update(double dt, double posX, double posY,
+                           double commandedAccel)
         {
             if (_reverseLeft > 0.0)
             {
                 _reverseLeft -= dt;
-                if (_reverseLeft <= 0.0) _stoppedFor = 0.0;
+                if (_reverseLeft <= 0.0) _windowActive = false;
                 return _reverseLeft > 0.0;
             }
-            _stoppedFor = blocked ? _stoppedFor + dt : 0.0;
-            if (_stoppedFor >= StuckSeconds)
+            if (commandedAccel <= 0.0)         // not trying to go forward
+            {
+                _windowActive = false;
+                return false;
+            }
+            if (!_windowActive)                // start measuring from here
+            {
+                _windowActive = true;
+                _windowTime = 0.0;
+                _startX = posX; _startY = posY;
+                return false;
+            }
+            _windowTime += dt;
+            double dx = posX - _startX, dy = posY - _startY;
+            if (dx * dx + dy * dy >= MinMoveDistance * MinMoveDistance)
+            {
+                _windowTime = 0.0;             // progressing — slide the window
+                _startX = posX; _startY = posY;
+                return false;
+            }
+            if (_windowTime >= WindowSeconds)  // commanded forward, went nowhere
             {
                 _reverseLeft = ReverseSeconds;
+                _windowActive = false;
                 return true;
             }
             return false;
         }
 
-        public void Reset() { _stoppedFor = 0.0; _reverseLeft = 0.0; }
+        public void Reset() { _windowActive = false; _reverseLeft = 0.0; }
     }
 
     // ------------------------------------------------------- action decoding
