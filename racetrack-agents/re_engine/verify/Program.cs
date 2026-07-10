@@ -174,6 +174,47 @@ static class Program
             Console.WriteLine($"  {(pass ? "PASS" : "FAIL")}  {name,-8} lanes={preset.Length} maxDiff={worst:E2}");
         }
 
+        // ---- WallClearance parity: known geometry on the a->b straight ----
+        // (car width 2.0, matching training: lane-0 centre -> 1.5 m free,
+        // divider -> 4.0 m, 0.7 m past either wall -> -0.7)
+        Console.WriteLine("--- wall clearance (car width 2.0) ---");
+        var wcTrack = Track.BuildRacetrackFast();
+        var wcSingle = new RacetrackSingle.HighwayObservationBuilder(
+            RacetrackSingle.HighwayObservationBuilder.RacetrackFastLanes());
+        (double y, double expect)[] wcCases = {
+            (0.0, 1.5), (2.5, 4.0), (5.0, 1.5), (7.2, -0.7), (-2.2, -0.7),
+        };
+        foreach (var (y, expect) in wcCases)
+        {
+            double a = wcTrack.WallClearance(new Vec2(70, y), 2.0);
+            double b = wcSingle.WallClearance(70, y, 2.0);
+            bool ok = Math.Abs(a - expect) < 1e-9 && Math.Abs(b - expect) < 1e-9;
+            allPass &= ok;
+            Console.WriteLine($"  {(ok ? "PASS" : "FAIL")}  y={y,5:F1} -> track={a:F2} single={b:F2} (expect {expect:F2})");
+        }
+
+        // ---- CarController physics parity vs highway-env BicycleVehicle ----
+        // Reference generated in python: start (10, 5, heading .3, speed 8),
+        // 15 steps accel 4, 20 steps (2, steer .3), 10 steps (-3, -.2), dt 1/15.
+        Console.WriteLine("--- CarController vs BicycleVehicle ---");
+        var car = new RacetrackSingle.CarController();
+        car.SetPose(10.0, 5.0, 0.3, 8.0);
+        double carDt = 1.0 / 15.0;
+        for (int i = 0; i < 15; i++) car.Step(carDt, 4.0, 0.0);
+        for (int i = 0; i < 20; i++) car.Step(carDt, 2.0, 0.3);
+        for (int i = 0; i < 10; i++) car.Step(carDt, -3.0, -0.2);
+        double[] got = { car.X, car.Y, car.Heading, car.Speed,
+                         car.Velocity.X, car.Velocity.Z };
+        double[] want = { 35.252217994, 28.278207476, 1.068805490, 12.666666667,
+                          6.061697451, 11.122126504 };
+        double carWorst = 0;
+        for (int i = 0; i < got.Length; i++)
+            carWorst = Math.Max(carWorst, Math.Abs(got[i] - want[i]));
+        bool carOk = carWorst < 1e-5;
+        allPass &= carOk;
+        Console.WriteLine($"  {(carOk ? "PASS" : "FAIL")}  45-step scripted drive maxDiff={carWorst:E2} " +
+                          $"(x={car.X:F3} y={car.Y:F3} v=({car.Velocity.X:F3},{car.Velocity.Z:F3}))");
+
         Console.WriteLine(allPass ? "ALL SCENARIOS MATCH" : "MISMATCH DETECTED");
         return allPass ? 0 : 1;
     }

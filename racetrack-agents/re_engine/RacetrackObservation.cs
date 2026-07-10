@@ -108,6 +108,13 @@ namespace RacetrackAgents
             return outLow + (v - inLow) * (outHigh - outLow) / (inHigh - inLow);
         }
 
+        // ALL speeds/velocities in this contract are METERS PER SECOND in
+        // track axes. If your engine hands you km/h (e.g. a kph Vector3),
+        // convert at the boundary — feeding kph scales every velocity 3.6x:
+        // the vx/vy observation channels clip at +-20 m/s and the model
+        // silently degrades with no error anywhere.
+        public static double KphToMs(double kph) { return kph / 3.6; }
+
         public static float Clamp1(double v)
         {
             if (v < -1.0) return -1f;
@@ -129,7 +136,8 @@ namespace RacetrackAgents
     public struct VehicleState
     {
         public double X, Y;        // position [m]
-        public double Vx, Vy;      // velocity [m/s] (world/track axes)
+        public double Vx, Vy;      // velocity [m/s] (world/track axes) —
+                                   // km/h sources: HwMath.KphToMs first!
         public double Heading;     // [rad], atan2 convention in track axes
 
         public VehicleState(double x, double y, double vx, double vy, double heading)
@@ -358,6 +366,35 @@ namespace RacetrackAgents
                 if (d < bestDist) { bestDist = d; best = lane; }
             }
             return best;
+        }
+
+        // Wall clearance — position-based "am I at a wall?". Mirror of
+        // race_env._wall_state(): the corridor is PAIRS of parallel lanes
+        // (lane 0 then lane 1 of each segment, consecutive in Lanes — true
+        // for BuildRacetrackFast and every track_<name>.json) and only the
+        // corridor's OUTER edges are walls. Returns the gap [m] between the
+        // car BODY edge and the nearest wall (~1.5 centered in a boundary
+        // lane, ~4.0 on the divider, <= 0 touching). Gate StuckRecovery
+        // with this so a slow standing start mid-road never reverses.
+        public double WallClearance(Vec2 p, double vehicleWidth)
+        {
+            int best = 0;
+            double bestScore = double.PositiveInfinity;
+            for (int i = 0; i < Lanes.Count; i++)
+            {
+                double d = Lanes[i].Distance(p);
+                if (d < bestScore) { bestScore = d; best = i; }
+            }
+            int pairBase = best - (best % 2);
+            Lane first = Lanes[pairBase];
+            Lane last = Lanes[Math.Min(pairBase + 1, Lanes.Count - 1)];
+            double sF, latF, sL, latL;
+            first.LocalCoordinates(p, out sF, out latF);
+            last.LocalCoordinates(p, out sL, out latL);
+            double halfCar = vehicleWidth / 2.0;
+            double lowClear = (latF + first.Width / 2.0) - halfCar;
+            double highClear = (last.Width / 2.0 - latL) - halfCar;
+            return Math.Min(lowClear, highClear);
         }
 
         // lat_off / ang_off of a vehicle, exactly like Vehicle.lane_offset
@@ -621,6 +658,165 @@ namespace RacetrackAgents
         {
             return HwMath.WrapToPi((90.0 - yawDegrees) * Math.PI / 180.0);
         }
+    }
+
+    // ------------------------------------------------- deployment assists
+    // Steering low-pass. The deterministic policy dithers the steering
+    // command around center (the 3 m occupancy-grid quantisation makes its
+    // input jump between cells), which shows as shaking on straights.
+    // An EMA on the DECODED steering removes the dither without retraining.
+    // Measured in the training env: Alpha 0.6 cuts steering sign-flips from
+    // 34 to 12 per 100 steps and improves centering on the straights
+    // (mean |lat| 1.8 -> 1.3 m) at identical lap count; 0.75 smooths
+    // further (8 flips/100) and is still lap-neutral.
+    // Call Smooth() once per policy tick (5 Hz); Reset() on respawn.
+    public sealed class SteeringSmoother
+    {
+        public double Alpha = 0.6;   // 0 = off; higher = smoother but laggier
+        private double _y;
+
+        public double Smooth(double steeringRad)
+        {
+            _y = Alpha * _y + (1.0 - Alpha) * steeringRad;
+            return _y;
+        }
+
+        public void Reset() { _y = 0.0; }
+    }
+
+    // Stuck detection + reverse indicator — MOVEMENT-BASED, no lane
+    // geometry needed. While the policy commands forward, the car must
+    // cover at least MinMoveDistance within WindowSeconds; if it doesn't,
+    // it is pinned (wall, obstacle) and Reversing is raised for
+    // ReverseSeconds so the caller overrides the action with a straight
+    // reverse. A standing start never triggers: even a sluggish 1 m/s^2
+    // launch covers 0.5 m in the first second, which resets the window.
+    //
+    //   var recovery = new StuckRecovery();
+    //   ...per policy tick, after ActionDecoder.Decode(...):
+    //   if (recovery.Update(0.2, ego.X, ego.Y, accel)) {
+    //       accel = recovery.ReverseAccel;   // back out
+    //       steer = 0.0;                     // keep wheels straight
+    //   }
+    //
+    // Position is any consistent ground-plane coordinate pair in METERS
+    // (world or track frame — only differences are used).
+    public sealed class StuckRecovery
+    {
+        public double MinMoveDistance = 0.3;   // must move this far ... [m]
+        public double WindowSeconds   = 1.0;   // ... within this long, while
+                                               // commanding forward
+        public double ReverseSeconds  = 1.6;   // how long to back up
+        public double ReverseAccel    = -3.0;  // override acceleration [m/s^2]
+
+        private bool _windowActive;
+        private double _windowTime, _startX, _startY;
+        private double _reverseLeft;
+
+        public bool Reversing { get { return _reverseLeft > 0.0; } }
+
+        // Call every policy tick with the tick duration, the car position
+        // [m] and the acceleration the policy commanded (pre-override).
+        // True while the caller should OVERRIDE the action with reverse.
+        public bool Update(double dt, double posX, double posY,
+                           double commandedAccel)
+        {
+            if (_reverseLeft > 0.0)
+            {
+                _reverseLeft -= dt;
+                if (_reverseLeft <= 0.0) _windowActive = false;
+                return _reverseLeft > 0.0;
+            }
+            if (commandedAccel <= 0.0)         // not trying to go forward
+            {
+                _windowActive = false;
+                return false;
+            }
+            if (!_windowActive)                // start measuring from here
+            {
+                _windowActive = true;
+                _windowTime = 0.0;
+                _startX = posX; _startY = posY;
+                return false;
+            }
+            _windowTime += dt;
+            double dx = posX - _startX, dy = posY - _startY;
+            if (dx * dx + dy * dy >= MinMoveDistance * MinMoveDistance)
+            {
+                _windowTime = 0.0;             // progressing — slide the window
+                _startX = posX; _startY = posY;
+                return false;
+            }
+            if (_windowTime >= WindowSeconds)  // commanded forward, went nowhere
+            {
+                _reverseLeft = ReverseSeconds;
+                _windowActive = false;
+                return true;
+            }
+            return false;
+        }
+
+        public void Reset() { _windowActive = false; _reverseLeft = 0.0; }
+    }
+
+    // Car-dynamics limits for the REAL game vehicle. The sim car steers
+    // instantly and corners at full grip; an engine car cannot. Two guards,
+    // applied AFTER SteeringSmoother, BEFORE the StuckRecovery override:
+    //   1. steering RATE limit — the wheel moves at most MaxSteerRate rad/s
+    //      toward the commanded angle (no instant lock-to-lock snaps).
+    //   2. cornering brake — bicycle-model curvature k = |tan(steer)| / Wheelbase
+    //      implies lateral acceleration v^2 * k. Above the grip budget
+    //      (MaxLateralAccel) the limiter lifts the throttle and applies a
+    //      SMALL brake (BrakeAccel), so the car slows into tight turns
+    //      instead of understeering into the wall.
+    // Defaults: full lock (30 deg) caps cornering at ~6.8 m/s; a gentle
+    // 0.1 rad command doesn't brake below ~16 m/s — straights unaffected.
+    public sealed class CorneringLimiter
+    {
+        public double Wheelbase        = 4.5;  // [m] match the game car
+        public double MaxSteerRate     = 2.0;  // [rad/s] ~0.5 s lock-to-lock
+        public double MaxLateralAccel  = 6.0;  // [m/s^2] grip budget
+        // The limiter slows the car INTO corners but can never stop it:
+        // vLimit is floored at MinCorneringSpeed, and the brake force is
+        // PROPORTIONAL to the overspeed (BrakeGain per m/s over, capped at
+        // MaxBrakeAccel) — so it triggers on any overspeed yet fades to zero
+        // as the limit is reached. Below vLimit the policy's throttle passes
+        // through untouched (no lift zone), so the car re-accelerates out of
+        // the corner instead of decaying to a stop under game drag.
+        public double MinCorneringSpeed = 5.0; // [m/s] hard floor for vLimit
+        public double BrakeGain         = 1.0; // [1/s] brake per m/s overspeed
+        public double MaxBrakeAccel     = -3.0;// [m/s^2] strongest brake
+
+        private double _steer;                 // current rate-limited wheel angle
+
+        // Call once per policy tick with the SMOOTHED command; modifies
+        // accel/steer in place. speed in m/s; steer in RADIANS (feeding
+        // degrees makes Tan() explode and drags the car to a standstill).
+        public void Apply(double dt, double speed, ref double accel, ref double steer)
+        {
+            double maxDelta = MaxSteerRate * dt;
+            double delta = steer - _steer;
+            if (delta > maxDelta) delta = maxDelta;
+            if (delta < -maxDelta) delta = -maxDelta;
+            _steer += delta;
+            steer = _steer;
+
+            double k = Math.Abs(Math.Tan(_steer)) / Wheelbase;
+            if (k <= 1e-6) return;
+
+            double vLimit = Math.Sqrt(MaxLateralAccel / k);
+            if (vLimit < MinCorneringSpeed) vLimit = MinCorneringSpeed;
+
+            double over = speed - vLimit;
+            if (over > 0.0)
+            {
+                double brake = -BrakeGain * over;      // gentle near the limit
+                if (brake < MaxBrakeAccel) brake = MaxBrakeAccel;
+                accel = Math.Min(accel, brake);
+            }
+        }
+
+        public void Reset() { _steer = 0.0; }
     }
 
     // ------------------------------------------------------- action decoding

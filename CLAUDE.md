@@ -28,7 +28,10 @@ cd racetrack-agents/re_engine/verify && dotnet run -- ..
 # Regenerate C#-side ground truth after ANY change to track geometry or observation config:
 python racetrack-agents/re_engine/export_track_json.py   # rewrites track.json + reference_obs.json
 
-# Convert a channels-first actor ONNX to the engine's channels-last input:
+# Export any checkpoint to ONNX from the CLI (1=full, 2=actor CHW, 3=actor NHWC, 0=all):
+python racetrack-agents/export_onnx.py <model.zip> -m 3 [-o out.onnx]
+
+# Convert an EXISTING channels-first actor ONNX to the engine's channels-last input:
 python racetrack-agents/re_engine/convert_onnx_nhwc.py <actor.onnx>
 
 # Legacy stack demo (TF 2.6 env required):

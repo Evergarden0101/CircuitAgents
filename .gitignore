@@ -4,3 +4,13 @@ racetrack-agents/agent/__pycache__/
 racetrack-agents/runs/sb3_ppo_task2_laning_overtaking/logs/
 racetrack-agents/runs/sb3_ppo_task2_laning_overtaking_fastdev/logs/
 racetrack-agents/logs/dqn2/
+# dotnet verify-harness Debug builds (repo tracks Release artifacts only)
+racetrack-agents/re_engine/verify/bin/Debug/
+racetrack-agents/re_engine/verify/obj/Debug/net10.0/apphost
+racetrack-agents/re_engine/verify/obj/Debug/net10.0/ref/
+racetrack-agents/re_engine/verify/obj/Debug/net10.0/refint/
+racetrack-agents/re_engine/verify/obj/Debug/net10.0/verify.csproj.*
+racetrack-agents/re_engine/verify/obj/Debug/net10.0/verify.dll
+racetrack-agents/re_engine/verify/obj/Debug/net10.0/verify.pdb
+racetrack-agents/re_engine/verify/obj/Debug/net10.0/verify.genruntimeconfig.cache
+racetrack-agents/re_engine/verify/obj/Debug/net10.0/verify.sourcelink.json
