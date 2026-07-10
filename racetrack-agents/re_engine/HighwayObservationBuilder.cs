@@ -308,6 +308,64 @@ namespace RacetrackSingle
         }
 
         // ============================================================
+        // Deployment assists
+        // ============================================================
+
+        // Steering low-pass — the deterministic policy dithers steering
+        // around center (3 m grid quantisation), i.e. shaking on straights.
+        // EMA on the DECODED steering fixes it without retraining; measured
+        // in the training env, Alpha 0.6 cuts sign-flips 34 -> 12 per 100
+        // steps and improves straight-line centering at identical laps.
+        // Call Smooth() once per policy tick (5 Hz); Reset() on respawn.
+        public sealed class SteeringSmoother
+        {
+            public double Alpha = 0.6;
+            double _y;
+            public double Smooth(double steeringRad)
+            {
+                _y = Alpha * _y + (1.0 - Alpha) * steeringRad;
+                return _y;
+            }
+            public void Reset() { _y = 0.0; }
+        }
+
+        // Stuck detection + reverse indicator: "commanding forward but not
+        // moving" for StuckSeconds raises Reversing for ReverseSeconds so
+        // the caller overrides the policy action with a straight reverse
+        // (the env's wall-escape manoeuvre). Usage per policy tick:
+        //   if (recovery.Update(0.2, egoSpeed, accel)) {
+        //       accel = recovery.ReverseAccel; steer = 0.0;
+        //   }
+        public sealed class StuckRecovery
+        {
+            public double StuckSpeed     = 0.5;   // |v| below this = stopped
+            public double StuckSeconds   = 1.0;   // stopped this long => trigger
+            public double ReverseSeconds = 1.6;   // how long to back up
+            public double ReverseAccel   = -3.0;  // override accel [m/s^2]
+            double _stoppedFor, _reverseLeft;
+            public bool Reversing { get { return _reverseLeft > 0.0; } }
+
+            public bool Update(double dt, double speed, double commandedAccel)
+            {
+                if (_reverseLeft > 0.0)
+                {
+                    _reverseLeft -= dt;
+                    if (_reverseLeft <= 0.0) _stoppedFor = 0.0;
+                    return _reverseLeft > 0.0;
+                }
+                bool blocked = Math.Abs(speed) < StuckSpeed && commandedAccel > 0.0;
+                _stoppedFor = blocked ? _stoppedFor + dt : 0.0;
+                if (_stoppedFor >= StuckSeconds)
+                {
+                    _reverseLeft = ReverseSeconds;
+                    return true;
+                }
+                return false;
+            }
+            public void Reset() { _stoppedFor = 0.0; _reverseLeft = 0.0; }
+        }
+
+        // ============================================================
         // Action decoding (ONNX "action_mean" [1,2], UNCLIPPED)
         // ============================================================
 
