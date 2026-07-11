@@ -27,8 +27,23 @@ ONNX 経由で C# ゲームエンジン (RE Engine) にデプロイするプロ�
 
 ## 2. オリジナル highway-env との違いと理由
 
-ベースは highway-env の racetrack 環境ですが、ゲームデプロイを目的に
-`racetrack-agents/race_env.py` (`RacetrackFast`) で以下を再設計しています。
+ベースは highway-env の racetrack 環境です。まずデフォルト設定を正確に押さえます
+(インストール版 `highway_env.envs.racetrack_env.RacetrackEnv` から抽出):
+
+| 項目 | highway-env デフォルト |
+|---|---|
+| 行動 | **ステアリングのみ** (`longitudinal: False`)、速度は離散 `target_speeds [0, 5, 10]` |
+| 観測 | OccupancyGrid **2ch** (presence / on_road)、±18 m の対称視野 |
+| 報酬 | 車線中央維持 `1/(1+4·lat²)` + 操作量ペナルティ `−0.3·‖action‖` + 衝突 −1 |
+| 速度 | speed_limit 10 m/s — 「速く走る」動機なし |
+| 壁 | **存在しない** — 路外は終了 (または放置)、すり抜け可能 |
+| 車両 | 運動学 Bicycle (タイヤスリップなし)、NPC 1 台、300 秒 |
+
+車線をなぞる研究には十分ですが、「アクセルを踏み、壁があり、速さを競う」ゲームの
+レースとは前提が異なります。ゲームデプロイを目的に、
+`racetrack-agents/race_env.py` (`RacetrackFast`) で以下を段階的に再設計しました
+(なし→反発→停止と進化した壁、wall-riding や壁這いの局所解を潰した報酬の経済設計など、
+変遷の詳細はスライド版を参照)。
 
 ### 2.1 壁の物理 (最重要の変更)
 
