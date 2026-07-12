@@ -217,6 +217,64 @@ Presentation Media / Trajectory Plot / Per-Track Videos セルで再現・保存
   - トラック追加手順: `race_env.py` にビルダー → C# プリセット →
     `export_track_json.py` → 検証ハーネス
 
+### 4.6 設定リファレンス — 報酬とシミュレーションの全パラメータ
+
+`RacetrackFast.default_config()` の実値です。**報酬の重みを変えたら §4.3 の
+lmap 範囲を再導出**してください (C# に複製される定数は §8.4 参照)。
+
+#### 報酬の重み (`_reward`)
+
+各項を合成 → `_checkpoint_bonus()` を**生単位で加算** →
+`lmap([-3, 3] → [0, 1])` → clip。「範囲寄与」列は 1 ステップで取り得る値の幅です。
+
+| パラメータ | 値 | 範囲寄与 | 意味・狙い |
+|---|---|---|---|
+| `lane_centering_reward` / `lane_centering_cost` | 1.0 / 6.0 | [0, +1] | 中央維持 `1/(1+6·lat²)` — 車線中央への引力 (基礎項) |
+| `speed_reward` | 1.0 | [−1, +1] | 速度 ÷ 制限速度。前進で加点、後退で減点 |
+| `forward_velocity_reward` | 0.8 | [−0.4, +0.8] | 進行方向への速度投影 — 「コース方向に」速く走らせる |
+| `steering_penalty` | 0.10 | [−0.1, 0] | 舵角の大きさに比例。大きすぎると壁任せ操舵を誘発するため小さめ |
+| `steering_jerk_penalty` | 0.20 | [−0.4, 0] | 舵の**符号反転**に課税 — 直線の蛇行を抑制 |
+| `reverse_penalty` | 0.80 | [−0.8, 0] | 速度 < −0.5 m/s で離散的に課税 (脱出ゾーンでは免除) |
+| `idle_penalty` / `idle_grace_steps` | 0.80 / 15 | [−0.8, 0] | \|速度\| < 0.5 m/s で課税。最初の 15 step (3 秒) は免除 |
+| `action_penalty` | 0.0 (無効) | 0 | 既定で撤廃 — 前進に課税し `reverse_penalty` と重複するため |
+| `wall_escape_reward` | 0.4 | [−1.2, +0.8] | 壁からのバック脱出に加点 / 壁擦り (`wall_ride_penalty` 0.6) に減点 |
+| `wall_escape_zone` / `wall_escape_progress` | 1.0 m / 0.8 | (上に含む) | 壁 1 m 以内でペナルティ免除 + Δクリアランス報酬 (clip [−0.2, +0.4]) |
+| `checkpoint_bonus` / `lap_bonus` | 1.0 / 2.0 | **生単位で加算** | 区間通過 (9 区間) / 1 周完了。sparse な長期目標。飽和許容 |
+| `collision_reward` | −5.0 | 上書き (終端) | 衝突・路外・壁接触 35 step 継続で全報酬を上書き。lmap 後 0 にクリップ |
+
+> **正規化**: `lmap([-3, 3] → [0, 1])`。現在の重みで通常ステップの下限 ≈ −2.8 /
+> 上限 ≈ +2.8。範囲がこれを覆わないと悪い状態が 0 に飽和し勾配が消えます
+> (`collision_reward=-5.0` は 0 に、周回ステップは 1.0 に飽和 — 意図的)。
+
+#### シミュレーション・行動・観測 (`config`)
+
+| パラメータ | 値 | 意味 |
+|---|---|---|
+| `duration` | 800 s | エピソード長 (評価時は 120 s / 60 s に短縮) |
+| `simulation_frequency` | 15 Hz | 物理ステップ周波数 |
+| `policy_frequency` | 5 Hz | 意思決定周波数 (action repeat = 3) |
+| `speed_limit` | 16 m/s | 目標上限速度 (速度報酬の分母) |
+| `action.type` | `ContinuousAction` | 縦横連続制御 (`longitudinal` + `lateral` = True) |
+| `acceleration_range` | [−5.0, +5.0] m/s² | 出力 [−1,1] → 加速度への写像係数 |
+| `steering_range` | [−π/6, +π/6] | 前輪舵角上限 (±30°) → 最小旋回半径 ≈ 8 m |
+| `dynamical` | True | 動的 Bicycle (線形タイヤスリップ, RK4) |
+| `car_length` | 4.5 m | 車長 (ホイールベース算出に使用) |
+| `observation` grid | `[[-9,27],[-18,18]]` / step `[3,3]` | 前方 27 m・後方 9 m・横 ±18 m、3 m セル → (10,12,12) |
+| `controlled_vehicles` / `other_vehicles` | 1 / 0→1 | 自車 1 台、NPC はフェーズ 2 で追加 |
+| `terminate_off_road` | True | コース外周を割ったら終端 |
+
+#### 壁・NPC (フェーズ 2)
+
+| パラメータ | 値 | 意味 |
+|---|---|---|
+| `wall_mode` | `"stop"` | 接触で停止、バックのみ脱出可 |
+| `wall_friction` | 0.6 | 接線速度を毎物理フレーム減衰 (**仮値** — §6.1 実ゲーム調整点) |
+| `wall_restitution` | 0.1 | bounce モード時のみ使用 (stop では不使用) |
+| `max_wall_contact_steps` | 35 (7 s) | 壁接触の継続がこれを超えるとクラッシュ扱い終端 |
+| `other_vehicles_speed_low/high` | 1.0 / 14.0 m/s | 遅い NPC で追い越しを、速い NPC で防御を強制 |
+| `other_vehicles_min_separation` / `sep_time` | 20 m / 2.0 s | 安全車間 = max(20, 速度 × 2) |
+| `idm_acc/dec/gap/time_range` | [1.5,5]/[2,5]/[2,8]/[0.8,2.5] | IDM の加減速・車間・車頭時間を個体毎にランダム化 |
+
 ---
 
 ## 5. 学習パイプライン
