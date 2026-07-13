@@ -437,7 +437,51 @@ python racetrack-agents/re_engine/export_track_json.py
   `StuckRecovery` / `CarController` (学習時と同一の Bicycle 動力学、速度を Vector3 で出力)
 - **単位は全て m/s・メートル・ラジアン**
 
-### 8.4 定数同期の掟
+### 8.4 C# 観測生成の契約 — highway-env の再現ポイント
+
+ゲーム側で毎フレーム `float[1440]` の観測テンソルを組み立てます。素朴に実装すると
+モデルは無警告で劣化するため、highway-env `OccupancyGridObservation` の挙動を
+そのまま移植します。**この 8 点が「素朴な移植」との差分** (すべて実測で検証済):
+
+1. **グリッドは非対称**: x = −9 m (後方) 〜 +27 m (前方)、y = ±18 m、3 m セル。
+   自車はセル (3, 6) に座り中央ではない (前方バイアス = コーナー先読み)。
+2. **x/y/vx/vy の値はトラック軸のまま**。ego 相対だが回転しない —
+   回転させるのは**セルインデックスだけ** (`align_to_vehicle_axes`)。
+   前方/右ベクトルへ Dot 射影しないこと。
+3. **vx/vy は自車速度との相対** (自車速度を引く)。
+4. **cos_h/sin_h は各車の絶対 heading** (ego 相対ではない)。
+5. **正規化は [−1, 1]** (値 ÷ レンジ、clip)。[0, 1] ではない。
+6. **on_road は独立レイヤ** — 車両とは無関係の「レーン中心線の軌跡」(下記)。
+7. **自車も書き込む** — NPC を全部書いた後、**最後に**書いて自セルを勝ち取る。
+   自車の x/y/vx/vy は 0、lat/ang オフセットは自車自身の値。
+8. **最近傍レーンは全 18 レーンに対し** `|lat| + はみ出し + |heading 差|`
+   (highway-env `distance_with_heading`) の argmin。
+
+**on_road レイヤ (レイキャストしないこと)**: 各レーンについて自車を投影して
+中心線上の始点 s0 を求め、s0 ± 100 m を 3 m 刻みで歩き、各中心線ウェイポイントが
+入るセルを 1 にする。**塗りつぶしマスクでも被覆率でもなく「中心線のトレース」**。
+レイキャストで道路面を塗ると幅 ~3 セルの帯になり、学習時と別物になって劣化する。
+
+**lat_off / ang_off の作り方 (ゲームに車線情報がなくても可)**: コライダー不要、
+中心線の幾何だけで計算する。① 上記の最近傍レーンを選ぶ → ② そのレーンのローカル
+座標で横オフセット = lat_off → ③ `wrap(heading − レーン heading)` = ang_off。
+レーンは `Track.BuildRacetrackFast()` (`_make_road` のハードコピー) か
+`track_<name>.json` (`export_track_json.py` で書き出し) から供給。
+
+**テンソルレイアウトと実行**:
+- 単一ファイル版は **HWC 平坦配列** `(ix*12 + iy)*10 + f` を出力 → NHWC モデル
+  (`-m 3`) に直結。CHW モデルに入れるとチャネルが混ざり出力がほぼ一定になる (§8.2)。
+- 推論は **5 Hz** (`policy_frequency`)。0.2 秒ごとにモデルを回し、間はアクションを保持。
+- 出力 `action_mean` [1,2] は**未 clip** → clip して `accel = a0×5.0` m/s²・
+  `steer = a1×π/6` rad にデコード (`ActionDecoder` / `DecodeAction`)。
+
+**検証 (`re_engine/verify/`)**: `export_track_json.py` が実環境から `track.json` と
+4 シナリオ (直線・円弧・追い越し・ヘアピン) の参照観測 `reference_obs.json` を書き出し、
+`dotnet run -- ..` が C# の出力とセル単位で突き合わせる。両ビルダー・両トラック供給
+(JSON / ハードコピー) で **maxDiff = 0.0 = ビット一致**。トラック幾何・グリッド・
+特徴を変えたら再生成 → 再検証。
+
+### 8.5 定数同期の掟
 
 `acceleration_range` / `steering_range` / `policy_frequency` / グリッド設定は
 C# 側 (`ActionDecoder` / ビルダー定数) に**意図的に複製**されています。
