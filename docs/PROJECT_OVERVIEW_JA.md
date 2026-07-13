@@ -320,6 +320,30 @@ lmap 範囲を再導出**してください (C# に複製される定数は §8.
 ![fast agent の TensorBoard 指標](tb_task2_fast_indicators.png)
 ![汎化 agent の TensorBoard 指標](tb_task3_gen_indicators.png)
 
+**フェーズ 1 のみを切り出した図** (フェーズ 2 のノイズを除いた素の学習):
+
+![fast agent フェーズ 1](tb_task2_fast_phase1.png)
+![汎化 agent フェーズ 1](tb_task3_gen_phase1.png)
+
+> フェーズ 1 単体で見ると重要な事実が読めます: **KL / clip_fraction が中盤で
+> 山を作った後、終盤に自然と下がる**。これは線形 LR 減衰が終盤で更新を凍結し、
+> チャーンを自己消火するためです。フェーズ 2 が固定 LR で崩れる (§5.4) のと
+> 対照的で、「フェーズ 2 も LR を減衰させよ」という推奨の直接の根拠になります。
+> value_loss も fast 0.13 / 汎化 ~3 まで下がり (フェーズ 2 の 43 / 117 と段違い)、
+> explained_variance は汎化ランでもフェーズ 2 のような −1 近くの崩落を示しません。
+
+**フェーズ 1 方策の走行軌跡ビデオ** (軌跡が描かれていく様子を動画化):
+`docs/traj_phase1_fast.mp4` (fast)、`traj_phase1_gen_fast.mp4` /
+`traj_phase1_gen_chicane.mp4` (汎化方策)。
+
+> 注: これらの動画は**当コンテナ内で学習したフェーズ 1 (NPC なし) チェックポイント**
+> (fast 12 万 / 汎化 15 万 step) から生成しています。本番ランのフェーズ 1 ベスト
+> (`runs/*/models/best/phase1/best_model.zip`、100 万 / 150 万 step) は**別 Python
+> バージョンで pickle 化**されており当環境では unpickle 不可 (`code() argument 13
+> must be str` = クロスバージョン bytecode)。本番モデルの軌跡動画は、学習した
+> 環境でノートブックの `animate_trajectory` セルに `best/phase1/best_model.zip` を
+> 渡せば同形式で再生成できます。
+
 - **train/learning_rate** — フェーズ 1 は線形減衰 (2e-4 → ~1e-7、
   `linear_schedule` × progress_remaining)。フェーズ 2 は **定数 1e-4**。
   フェーズ 1 末の「急落」はスケジュール仕様であり学習停滞ではない。
